@@ -12,11 +12,14 @@ producing a genuine before/after comparison rather than three different
 measurement approaches.
 """
 
+import sys
 import time
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Make `benchmark` findable regardless of the caller's working directory.
+sys.path.insert(0, str(Path(__file__).parent))
 from benchmark import BENCHMARK
 
 RESULTS_DIR = Path(__file__).parent / "results"
