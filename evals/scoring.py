@@ -139,6 +139,7 @@ def run_benchmark(pipeline_fn, run_label: str, tiers: list = None) -> dict:
             "latency_seconds": round(latency, 2),
             "tokens_used": output.get("tokens_used", 0),
             "retries": output.get("retries", 0),
+            "rag_hits": output.get("rag_hits", 0),
             "error": error,
         })
 

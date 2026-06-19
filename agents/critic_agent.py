@@ -50,6 +50,7 @@ def review_sql(sql: str, schema_context: str, client: anthropic.Anthropic) -> di
     resp = client.messages.create(
         model=MODEL,
         max_tokens=256,
+        temperature=0,
         system=_CRITIC_SYSTEM,
         messages=[
             {

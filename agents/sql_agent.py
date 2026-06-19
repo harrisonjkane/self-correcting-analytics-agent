@@ -14,6 +14,7 @@ import sqlite3
 import anthropic
 
 from agents.critic_agent import review_sql
+from agents.correction_log import log_correction, retrieve_similar_corrections
 
 MODEL = "claude-sonnet-4-6"
 MAX_ATTEMPTS = 3  # initial generation + up to 2 corrective regenerations
@@ -43,7 +44,9 @@ def ask(
     client: anthropic.Anthropic,
 ) -> dict:
     """
-    Phase 2: generate SQL → Critic review → self-correct loop → execute → extract.
+    Phase 2+: generate SQL → Critic review → self-correct loop → execute → extract.
+    Phase 3 adds: RAG retrieval of similar past corrections injected before generation,
+    and logging of every successful correction back to the store.
 
     schema            — basic schema for SQL generation (same as Phase 1).
     schema_with_enums — extended schema with stored enum values for the Critic.
@@ -52,16 +55,42 @@ def ask(
     retries = 0
     critic_warnings = None
 
+    # ── Phase 3: retrieve similar past corrections (RAG) ─────────────────────
+    similar_corrections = []
+    try:
+        similar_corrections = retrieve_similar_corrections(question, "sql", k=3)
+    except Exception:
+        pass  # RAG failure must never block the main pipeline
+
+    system = _SQL_SYSTEM
+    if similar_corrections:
+        examples = []
+        for s in similar_corrections:
+            examples.append(
+                f'Past question: "{s["question"]}"\n'
+                f'Wrong SQL: {s["generated_code"]}\n'
+                f'Issue: {s["error_or_reason"]}\n'
+                f'Corrected SQL: {s["corrected_code"]}'
+            )
+        rag_block = (
+            "Here are similar past questions where the first attempt was wrong "
+            "and how it was corrected:\n\n" + "\n\n".join(examples)
+        )
+        system = f"{_SQL_SYSTEM}\n\n{rag_block}"
+
     # Multi-turn message history so each regeneration has full correction context.
     messages = [{"role": "user", "content": f"{schema}\n\nQuestion: {question}"}]
 
     sql = None
+    prev_rejected_sql = None
+    prev_rejection_reason = None
+
     for attempt in range(MAX_ATTEMPTS):
         # ── Generate (or re-generate) SQL ────────────────────────────────────
         gen_resp = client.messages.create(
             model=MODEL,
             max_tokens=512,
-            system=_SQL_SYSTEM,
+            system=system,
             messages=messages,
         )
         sql = gen_resp.content[0].text.strip()
@@ -72,9 +101,20 @@ def ask(
         tokens += review.get("tokens_used", 0)
 
         if review["passed"]:
+            # ── Phase 3: log successful correction ───────────────────────────
+            if prev_rejected_sql is not None:
+                try:
+                    log_correction(
+                        question, "sql",
+                        prev_rejected_sql, prev_rejection_reason, sql,
+                    )
+                except Exception:
+                    pass  # log failure must never block execution
             break
 
         critic_warnings = review["reason"]
+        prev_rejected_sql = sql
+        prev_rejection_reason = critic_warnings
 
         if attempt == MAX_ATTEMPTS - 1:
             # All attempts exhausted — execute the last SQL anyway.
@@ -138,6 +178,7 @@ def ask(
         "raw_result": rows,
         "tokens_used": tokens,
         "retries": retries,
+        "rag_hits": len(similar_corrections),
         "critic_warnings": critic_warnings,
         "error": exec_error,
     }
