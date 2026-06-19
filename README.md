@@ -1,4 +1,4 @@
-# AI Analytics Consultant (DataChat v2)
+# Self-Correcting-Analytics-Agent (DataChat v2)
 
 A multi-agent analytics system that connects to a database, explores schema,
 writes SQL, builds visualizations, trains models, and explains results —
