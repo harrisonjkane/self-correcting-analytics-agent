@@ -15,6 +15,7 @@ import anthropic
 
 from agents.critic_agent import review_sql
 from agents.correction_log import log_correction, retrieve_similar_corrections
+from agents.explainer_agent import explain
 
 MODEL = "claude-sonnet-4-6"
 MAX_ATTEMPTS = 3  # initial generation + up to 2 corrective regenerations
@@ -172,8 +173,17 @@ def ask(
         answer = None
         exec_error = "failed to parse answer JSON"
 
+    # ── Explain answer in plain English ──────────────────────────────────────
+    explanation = None
+    if answer is not None:
+        try:
+            explanation = explain(question, sql, answer, client)
+        except Exception:
+            pass  # explainer failure must never block the result
+
     return {
         "answer": answer,
+        "explanation": explanation,
         "sql": sql,
         "raw_result": rows,
         "tokens_used": tokens,
