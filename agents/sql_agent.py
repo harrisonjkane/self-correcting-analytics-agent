@@ -1,11 +1,12 @@
 """
 SQL agent — Phase 1 and Phase 2 implementations.
 
-Phase 1: run_query()  — single-pass, no self-correction.
-Phase 2: ask()        — generate → Critic review → self-correct loop → execute.
+Phase 1: run_query()  — single-pass, no self-correction (self-contained).
+Phase 2: ask()        — thin entry point; all routing and pipeline logic
+                        lives in orchestrator_agent.run_pipeline().
 
 Both functions return the same dict shape so the eval harness scores them
-identically. Only 'retries' and 'critic_warnings' differ between phases.
+identically. Only 'retries', 'critic_warnings', and 'chart_path' differ.
 """
 
 import json
@@ -13,13 +14,7 @@ import sqlite3
 
 import anthropic
 
-from agents.chart_agent import create_chart
-from agents.critic_agent import review_sql
-from agents.correction_log import log_correction, retrieve_similar_corrections
-from agents.explainer_agent import explain
-
 MODEL = "claude-sonnet-4-6"
-MAX_ATTEMPTS = 3  # initial generation + up to 2 corrective regenerations
 
 _SQL_SYSTEM = """\
 You are a senior SQL analyst for a B2B SaaS company.
@@ -46,165 +41,15 @@ def ask(
     client: anthropic.Anthropic,
 ) -> dict:
     """
-    Phase 2+: generate SQL → Critic review → self-correct loop → execute → extract.
-    Phase 3 adds: RAG retrieval of similar past corrections injected before generation,
-    and logging of every successful correction back to the store.
-
-    schema            — basic schema for SQL generation (same as Phase 1).
-    schema_with_enums — extended schema with stored enum values for the Critic.
+    Phase 2+ entry point — delegates all pipeline logic to the Orchestrator.
+    Signature and return shape are unchanged; all callers are unaffected.
     """
-    tokens = 0
-    retries = 0
-    critic_warnings = None
-
-    # ── Phase 3: retrieve similar past corrections (RAG) ─────────────────────
-    similar_corrections = []
-    try:
-        similar_corrections = retrieve_similar_corrections(question, "sql", k=3)
-    except Exception:
-        pass  # RAG failure must never block the main pipeline
-
-    system = _SQL_SYSTEM
-    if similar_corrections:
-        examples = []
-        for s in similar_corrections:
-            examples.append(
-                f'Past question: "{s["question"]}"\n'
-                f'Wrong SQL: {s["generated_code"]}\n'
-                f'Issue: {s["error_or_reason"]}\n'
-                f'Corrected SQL: {s["corrected_code"]}'
-            )
-        rag_block = (
-            "Here are similar past questions where the first attempt was wrong "
-            "and how it was corrected:\n\n" + "\n\n".join(examples)
-        )
-        system = f"{_SQL_SYSTEM}\n\n{rag_block}"
-
-    # Multi-turn message history so each regeneration has full correction context.
-    messages = [{"role": "user", "content": f"{schema}\n\nQuestion: {question}"}]
-
-    sql = None
-    prev_rejected_sql = None
-    prev_rejection_reason = None
-
-    for attempt in range(MAX_ATTEMPTS):
-        # ── Generate (or re-generate) SQL ────────────────────────────────────
-        gen_resp = client.messages.create(
-            model=MODEL,
-            max_tokens=512,
-            system=system,
-            messages=messages,
-        )
-        sql = gen_resp.content[0].text.strip()
-        tokens += gen_resp.usage.input_tokens + gen_resp.usage.output_tokens
-
-        # ── Critic review ─────────────────────────────────────────────────────
-        review = review_sql(sql, schema_with_enums, client, question=question)
-        tokens += review.get("tokens_used", 0)
-
-        if review["passed"]:
-            # ── Phase 3: log successful correction ───────────────────────────
-            if prev_rejected_sql is not None:
-                try:
-                    log_correction(
-                        question, "sql",
-                        prev_rejected_sql, prev_rejection_reason, sql,
-                    )
-                except Exception:
-                    pass  # log failure must never block execution
-            break
-
-        critic_warnings = review["reason"]
-        prev_rejected_sql = sql
-        prev_rejection_reason = critic_warnings
-
-        if attempt == MAX_ATTEMPTS - 1:
-            # All attempts exhausted — execute the last SQL anyway.
-            break
-
-        # ── Prepare correction context for the next attempt ───────────────────
-        retries += 1
-        messages.append({"role": "assistant", "content": sql})
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    f"Your SQL has an issue that must be fixed:\n{critic_warnings}\n\n"
-                    "Rewrite the SQL to fix this exact issue. "
-                    "Return ONLY the corrected SQL."
-                ),
-            }
-        )
-
-    # ── Execute SQL ───────────────────────────────────────────────────────────
-    try:
-        conn = sqlite3.connect(db_path)
-        rows = conn.execute(sql).fetchall()
-        conn.close()
-        exec_error = None
-    except Exception as exc:
-        return {
-            "answer": None,
-            "sql": sql,
-            "error": str(exc),
-            "tokens_used": tokens,
-            "retries": retries,
-            "critic_warnings": critic_warnings,
-        }
-
-    # ── Extract typed answer ──────────────────────────────────────────────────
-    raw_preview = json.dumps(rows[:20], default=str)
-    extract_resp = client.messages.create(
-        model=MODEL,
-        max_tokens=256,
-        system=_EXTRACT_SYSTEM,
-        messages=[
-            {
-                "role": "user",
-                "content": f"Question: {question}\n\nSQL result rows: {raw_preview}",
-            }
-        ],
-    )
-    tokens += extract_resp.usage.input_tokens + extract_resp.usage.output_tokens
-
-    try:
-        answer = json.loads(extract_resp.content[0].text.strip()).get("answer")
-        exec_error = None
-    except (json.JSONDecodeError, AttributeError):
-        answer = None
-        exec_error = "failed to parse answer JSON"
-
-    # ── Explain answer in plain English ──────────────────────────────────────
-    explanation = None
-    if answer is not None:
-        try:
-            explanation = explain(question, sql, answer, client)
-        except Exception:
-            pass  # explainer failure must never block the result
-
-    # ── Generate chart ────────────────────────────────────────────────────────
-    chart_path = None
-    if answer is not None:
-        try:
-            chart_path = create_chart(question, answer, "charts", client, raw_result=rows)
-        except Exception:
-            pass  # chart failure must never block the result
-
-    return {
-        "answer": answer,
-        "explanation": explanation,
-        "sql": sql,
-        "raw_result": rows,
-        "tokens_used": tokens,
-        "retries": retries,
-        "rag_hits": len(similar_corrections),
-        "critic_warnings": critic_warnings,
-        "error": exec_error,
-        "chart_path": chart_path,
-    }
+    from agents.orchestrator_agent import run_pipeline  # lazy import avoids circular dep
+    return run_pipeline(question, schema, schema_with_enums, db_path, client)
 
 
 def run_query(question: str, schema: str, db_path: str, client: anthropic.Anthropic) -> dict:
+    """Phase 1 baseline — single-pass SQL generation, no Critic or self-correction."""
     tokens = 0
 
     # ── Step 1: generate SQL ─────────────────────────────────────────────────
@@ -235,7 +80,7 @@ def run_query(question: str, schema: str, db_path: str, client: anthropic.Anthro
         }
 
     # ── Step 3: extract typed answer ─────────────────────────────────────────
-    raw_preview = json.dumps(rows[:20], default=str)  # cap at 20 rows for the prompt
+    raw_preview = json.dumps(rows[:20], default=str)
     extract_resp = client.messages.create(
         model=MODEL,
         max_tokens=256,
@@ -253,8 +98,8 @@ def run_query(question: str, schema: str, db_path: str, client: anthropic.Anthro
     tokens += extract_resp.usage.input_tokens + extract_resp.usage.output_tokens
 
     try:
-        answer_json = json.loads(extract_resp.content[0].text.strip())
-        answer = answer_json.get("answer")
+        answer = json.loads(extract_resp.content[0].text.strip()).get("answer")
+        exec_error = None
     except (json.JSONDecodeError, AttributeError):
         answer = None
         exec_error = "failed to parse answer JSON"
