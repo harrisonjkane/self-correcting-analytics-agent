@@ -9,3 +9,5 @@ evals/results/*.json
 evals/results/*.jsonl
 *.egg-info/
 .DS_Store
+
+charts/*.png
