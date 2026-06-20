@@ -1,4 +1,4 @@
-"""DataChat — Streamlit UI for the self-correcting analytics agent pipeline."""
+"""Multi-Agent Query Engine — Streamlit UI for the full agent pipeline."""
 
 import os
 
@@ -18,7 +18,23 @@ EXAMPLE_QUESTIONS = [
     q["question"] for q in BENCHMARK if q["tier"] in (1, 2, 3)
 ][:6]
 
-st.set_page_config(page_title="DataChat", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Multi-Agent Query Engine", page_icon="📊", layout="wide")
+
+st.markdown(
+    """
+    <style>
+        .stChatMessage { border-radius: 12px; }
+        .block-container { padding-top: 2rem; }
+        h1 { color: #1F4E79 !important; }
+        a { color: #2E75B6 !important; }
+        .stCode code, pre code { color: #1a1a1a !important; }
+        [data-testid="stChatMessage"] p,
+        [data-testid="stChatMessage"] li,
+        [data-testid="stChatMessage"] span { color: #1a1a1a !important; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ── Session state init ────────────────────────────────────────────────────────
 if "ready" not in st.session_state:
@@ -39,18 +55,34 @@ if "ready" not in st.session_state:
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.title("DataChat")
+    st.title("Multi-Agent Query Engine")
     st.markdown(
-        "Ask plain-English questions about your B2B SaaS business data. "
-        "The pipeline writes SQL, reviews it for correctness, self-corrects if needed, "
-        "and returns a plain-English answer — no SQL knowledge required."
+        "Ask questions about your data in plain English. "
+        "SQL is generated, reviewed by a Critic agent, and automatically corrected "
+        "before you ever see it."
     )
 
     st.divider()
 
     st.subheader("Database Schema")
     if st.session_state.get("ready"):
-        st.code(st.session_state.schema, language=None)
+        for line in st.session_state.schema.splitlines()[1:]:  # skip "Tables:" header
+            line = line.strip()
+            if not line:
+                continue
+            table_part, _, fk_raw = line.partition(" -- FK: ")
+            paren = table_part.index("(")
+            table_name = table_part[:paren]
+            cols_str = table_part[paren + 1 : -1]
+            cols = [c.strip() for c in cols_str.split(", ")]
+            with st.expander(table_name):
+                for col in cols:
+                    name, _, col_type = col.partition(" ")
+                    st.markdown(f"**`{name}`** {col_type}")
+                if fk_raw:
+                    st.markdown("**Foreign keys:**")
+                    for fk in fk_raw.split("; "):
+                        st.markdown(f"- `{fk.strip()}`")
     else:
         st.caption("Schema unavailable — check startup error above.")
 
@@ -61,7 +93,7 @@ with st.sidebar:
         st.markdown(f"- {q}")
 
 # ── Main area ─────────────────────────────────────────────────────────────────
-st.title("📊 DataChat")
+st.title("📊 Multi-Agent Query Engine")
 
 if not st.session_state.get("ready"):
     st.error(
@@ -74,6 +106,8 @@ if not st.session_state.get("ready"):
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+        if msg["role"] == "assistant" and msg.get("chart_path"):
+            st.image(msg["chart_path"])
         if msg["role"] == "assistant" and msg.get("sql"):
             with st.expander("View SQL & raw results"):
                 st.code(msg["sql"], language="sql")
@@ -112,6 +146,8 @@ if question := st.chat_input("Ask a question about your data..."):
         else:
             explanation = result.get("explanation") or str(result.get("answer", "No result."))
             st.markdown(explanation)
+            if result.get("chart_path"):
+                st.image(result["chart_path"])
             if result.get("sql"):
                 with st.expander("View SQL & raw results"):
                     st.code(result["sql"], language="sql")
@@ -120,6 +156,7 @@ if question := st.chat_input("Ask a question about your data..."):
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": explanation,
+                "chart_path": result.get("chart_path"),
                 "sql": result.get("sql"),
                 "raw_result": result.get("raw_result"),
             })

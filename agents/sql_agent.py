@@ -13,6 +13,7 @@ import sqlite3
 
 import anthropic
 
+from agents.chart_agent import create_chart
 from agents.critic_agent import review_sql
 from agents.correction_log import log_correction, retrieve_similar_corrections
 from agents.explainer_agent import explain
@@ -181,6 +182,14 @@ def ask(
         except Exception:
             pass  # explainer failure must never block the result
 
+    # ── Generate chart ────────────────────────────────────────────────────────
+    chart_path = None
+    if answer is not None:
+        try:
+            chart_path = create_chart(question, answer, "charts", client, raw_result=rows)
+        except Exception:
+            pass  # chart failure must never block the result
+
     return {
         "answer": answer,
         "explanation": explanation,
@@ -191,6 +200,7 @@ def ask(
         "rag_hits": len(similar_corrections),
         "critic_warnings": critic_warnings,
         "error": exec_error,
+        "chart_path": chart_path,
     }
 
 

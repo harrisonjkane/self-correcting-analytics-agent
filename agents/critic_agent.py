@@ -65,6 +65,33 @@ Respond with ONLY a JSON object — no markdown fences, no explanation:
 
 Report the first failing check you find. Do not list multiple issues."""
 
+_CHART_CRITIC_SYSTEM = """\
+You are a code safety and quality reviewer for auto-generated matplotlib chart code.
+
+Check the code against these rules:
+
+1. NO IMPORTS: The code must not contain any import statements. All needed
+   libraries (plt, pd) are pre-injected into the execution scope. Any import
+   line is an immediate failure.
+
+2. NO UNSAFE OPERATIONS: The code must not call open(), eval(), exec(), or
+   access os, subprocess, requests, socket, or any other module or file/network
+   operation. The ONLY allowed file operation is plt.savefig(CHART_PATH, ...).
+
+3. SENSIBLE CHART TYPE: Bar charts (ax.bar) for grouped category comparisons.
+   Horizontal bar charts (ax.barh) for ranked lists so long labels fit. Pie
+   charts and scatter plots are only acceptable if the data shape clearly
+   requires them. Flag completely wrong chart types.
+
+4. SAVES CORRECTLY: The code must call plt.savefig(CHART_PATH, ...) and must
+   NOT call plt.show().
+
+Respond with ONLY a JSON object — no markdown fences:
+  {"passed": true, "reason": ""}
+  {"passed": false, "reason": "<check name>: <specific issue>"}
+
+Report the first failing check only."""
+
 
 def review_sql(
     sql: str,
@@ -90,6 +117,42 @@ def review_sql(
                     f"{question_line}"
                     f"Schema (with stored values):\n{schema_context}"
                     f"\n\nSQL to review:\n{sql}"
+                ),
+            }
+        ],
+    )
+    tokens = resp.usage.input_tokens + resp.usage.output_tokens
+
+    try:
+        result = json.loads(resp.content[0].text.strip())
+        result["tokens_used"] = tokens
+        return result
+    except (json.JSONDecodeError, AttributeError):
+        return {"passed": True, "reason": "", "tokens_used": tokens, "parse_error": True}
+
+
+def review_chart_code(
+    code: str,
+    question: str,
+    result_description: str,
+    client: anthropic.Anthropic,
+) -> dict:
+    """
+    Reviews auto-generated matplotlib chart code for safety and correctness.
+    Returns {"passed": bool, "reason": str, "tokens_used": int}.
+    """
+    resp = client.messages.create(
+        model=MODEL,
+        max_tokens=256,
+        temperature=0,
+        system=_CHART_CRITIC_SYSTEM,
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    f"Question: {question}\n\n"
+                    f"Data being plotted:\n{result_description}\n\n"
+                    f"Chart code to review:\n{code}"
                 ),
             }
         ],
