@@ -15,7 +15,7 @@ import sys
 import anthropic
 from dotenv import load_dotenv
 
-from agents.model_agent import should_model, train_model
+from agents.model_agent import should_model, train_model, _metric_can_be_negative
 from agents.schema_agent import get_schema_with_enums
 
 load_dotenv()
@@ -139,3 +139,92 @@ print(
 
 print("\n" + "═" * 60)
 print("Forecast test complete.")
+
+# ── Test 3: _metric_can_be_negative() discrimination ─────────────────────────
+print("\n" + "═" * 60)
+print("TEST 3 — _metric_can_be_negative() discrimination")
+print("═" * 60)
+
+REVENUE_SQL = (
+    "SELECT strftime('%Y-%m', o.order_date) AS period, "
+    "ROUND(SUM(oi.quantity * oi.unit_price), 2) AS revenue "
+    "FROM order_items oi JOIN orders o ON oi.order_id = o.order_id "
+    "WHERE o.status = 'Completed' GROUP BY 1 ORDER BY 1"
+)
+DELTA_SQL = (
+    "SELECT period, current_rev - prior_rev AS revenue_change "
+    "FROM monthly_summary ORDER BY period"
+)
+
+discrimination_cases = [
+    # (question, sql, expected_can_be_negative, label)
+    ("forecast next quarter's revenue with a confidence interval",  REVENUE_SQL, False, "revenue forecast → CLAMP"),
+    ("forecast month-over-month revenue change for next quarter",   REVENUE_SQL, True,  "MoM change keyword → KEEP"),
+    ("project revenue delta over the next 3 months",               REVENUE_SQL, True,  "delta keyword → KEEP"),
+    ("forecast the difference in monthly revenue versus last year", REVENUE_SQL, True,  "difference + versus last → KEEP"),
+    ("forecast customer count for next quarter",                    REVENUE_SQL, False, "customer count → CLAMP"),
+    ("predict next month's units sold",                            REVENUE_SQL, False, "units sold → CLAMP"),
+    ("forecast revenue change year-over-year",                     REVENUE_SQL, True,  "year-over-year keyword → KEEP"),
+    ("forecast next quarter revenue",                              DELTA_SQL,   True,  "SQL subtraction → KEEP (no keyword needed)"),
+]
+
+all_ok = True
+for question, sql, expected, label in discrimination_cases:
+    got = _metric_can_be_negative(question, sql)
+    status = "PASS" if got == expected else "FAIL"
+    if status == "FAIL":
+        all_ok = False
+    action = "KEEP  " if got else "CLAMP "
+    print(f"  {status}  [{action}]  {label}")
+
+if not all_ok:
+    print("\nFAIL: _metric_can_be_negative() discrimination test failed")
+    sys.exit(1)
+print(f"\n  All {len(discrimination_cases)} cases correct.\n")
+
+# ── Test 4: Side-by-side clamp behavior (reuses Test 2 SARIMAX output) ───────
+print("═" * 60)
+print("TEST 4 — Side-by-side clamp behavior (revenue vs. delta question)")
+print("         Using Test 2's actual SARIMAX lower_bound values")
+print("═" * 60)
+
+raw_lower  = result["lower_bound"]
+raw_upper  = result["upper_bound"]
+raw_dates  = result["forecast_dates"]
+actual_sql = result["sql"]
+
+revenue_q = "forecast next quarter's revenue with a confidence interval"
+delta_q   = "forecast month-over-month revenue change for next quarter"
+
+can_neg_revenue = _metric_can_be_negative(revenue_q, actual_sql)
+can_neg_delta   = _metric_can_be_negative(delta_q,   actual_sql)
+
+display_revenue = list(raw_lower) if can_neg_revenue else [max(0.0, v) for v in raw_lower]
+display_delta   = list(raw_lower) if can_neg_delta   else [max(0.0, v) for v in raw_lower]
+
+print(f"\n  {'Date':<10}  {'raw lower_bound':>16}  {'Revenue display':>16}  {'Delta display':>16}")
+print(f"  {'─'*10}  {'─'*16}  {'─'*16}  {'─'*16}")
+for d, raw, rev, dlt in zip(raw_dates, raw_lower, display_revenue, display_delta):
+    rev_note = " ← floored" if raw < 0 and rev > raw else ""
+    dlt_note = " ← preserved" if raw < 0 else ""
+    print(f"  {d:<10}  ${raw:>14,.2f}  ${rev:>14,.2f}{rev_note}  ${dlt:>14,.2f}{dlt_note}")
+
+print(f"\n  revenue question → _metric_can_be_negative: {can_neg_revenue}  → {'CLAMP' if not can_neg_revenue else 'KEEP'}")
+print(f"  delta question   → _metric_can_be_negative: {can_neg_delta}   → {'CLAMP' if not can_neg_delta else 'KEEP'}")
+
+assert can_neg_revenue == False, f"Expected False for revenue question, got {can_neg_revenue}"
+assert can_neg_delta   == True,  f"Expected True for delta question, got {can_neg_delta}"
+
+has_negative = any(v < 0 for v in raw_lower)
+if has_negative:
+    assert display_revenue != display_delta, "Expected clamped and unclamped to differ on negative values"
+    print(f"\n  PASS — negative lower bounds exist and are treated differently:")
+    print(f"    Revenue (CLAMP):  negatives replaced with 0.0")
+    print(f"    Delta   (KEEP ):  negatives preserved as-is")
+else:
+    print(f"\n  NOTE — no negative lower bounds in this run (all SARIMAX CIs above 0).")
+    print(f"    Detection logic still discriminates correctly (shown above).")
+    print(f"    PASS — conditional routing verified even without a negative sample.")
+
+print("\n" + "═" * 60)
+print("All tests complete.")

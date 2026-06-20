@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import sqlite3
 import uuid
 
@@ -43,6 +44,48 @@ _MODELING_KEYWORDS = frozenset({
     "next month", "next quarter", "next year", "trend over time",
     "predict future", "confidence interval", "project revenue",
 })
+
+# Phrases that indicate the forecast target is a signed metric (delta, rate, change)
+# that can legitimately produce negative values. Used by _metric_can_be_negative().
+_DELTA_SIGNALS = frozenset({
+    "change",            # "revenue change", "net change"
+    "delta",             # "revenue delta"
+    "difference",        # "difference vs last quarter"
+    "growth rate",       # explicitly a rate, not absolute revenue
+    "rate of change",
+    "month-over-month",
+    "mom ",              # trailing space avoids matching "momentum"
+    "year-over-year",
+    "yoy ",              # trailing space avoids other "yoy" substrings
+    "versus last",       # "revenue versus last quarter"
+    "compared to last",
+    "net change",
+    "backlog",           # backlog balance can increase or decrease
+    "contraction",
+})
+
+
+def _metric_can_be_negative(question: str, sql: str) -> bool:
+    """
+    Returns True if the forecast target is a signed metric that can legitimately
+    be negative (deltas, rates, changes). When True, the lower CI bound is kept
+    as-is; when False, it is clamped to >= 0.
+
+    Two signals — either is sufficient:
+      1. Question keywords: phrases indicating a delta/rate rather than an
+         inherently non-negative quantity like revenue or unit count.
+      2. SQL SELECT subtraction: a "current - prior" expression in the SELECT
+         clause identifies a delta computation regardless of question phrasing.
+    """
+    q = question.lower()
+    if any(sig in q for sig in _DELTA_SIGNALS):
+        return True
+    select_match = re.search(r'\bSELECT\b(.*?)\bFROM\b', sql, re.IGNORECASE | re.DOTALL)
+    if select_match:
+        if re.search(r'\b\w+(?:\.\w+)?\s*-\s*\w+(?:\.\w+)?\b', select_match.group(1)):
+            return True
+    return False
+
 
 _MODEL_PLAN_SYSTEM = """\
 You are a machine learning planning agent for a B2B SaaS analytics database.
@@ -365,7 +408,7 @@ def _plot_forecast(
     series: pd.Series,
     forecast_dates: list[str],
     point_forecast: list[float],
-    lower_bound: list[float],
+    lower_display: list[float],
     upper_bound: list[float],
     chart_dir: str,
     confidence_level: float = 0.95,
@@ -392,8 +435,8 @@ def _plot_forecast(
         # Forecast line
         ax.plot(fc_dates, point_forecast, color="#2E75B6", lw=2,
                 linestyle="--", label="Forecast")
-        # Confidence band (forecast portion only)
-        ax.fill_between(fc_dates, lower_bound, upper_bound,
+        # Confidence band — lower_display may be negative for signed metrics (deltas/rates)
+        ax.fill_between(fc_dates, lower_display, upper_bound,
                         color="#2E75B6", alpha=0.18, label=f"{cl_pct}% CI")
 
         ax.set_xlabel("Month")
@@ -487,8 +530,14 @@ def _train_forecast(
         return _err(f"forecast generation failed: {exc}", task_type="forecast", sql=sql)
 
     point_forecast = [round(float(v), 2) for v in point_mean.values]
-    lower_bound    = [round(float(v), 2) for v in ci.iloc[:, 0].values]
+    lower_bound    = [round(float(v), 2) for v in ci.iloc[:, 0].values]  # raw SARIMAX output
     upper_bound    = [round(float(v), 2) for v in ci.iloc[:, 1].values]
+    # Clamp only for inherently non-negative metrics (revenue, units, counts).
+    # Signed metrics (deltas, rates, changes) may legitimately be negative.
+    if _metric_can_be_negative(question, sql):
+        lower_display = list(lower_bound)
+    else:
+        lower_display = [max(0.0, v) for v in lower_bound]
 
     last_date = series.index[-1]
     forecast_dates = [
@@ -502,13 +551,13 @@ def _train_forecast(
         summary = (
             f"We project {forecast_dates[0]} revenue of approximately "
             f"${point_forecast[0]:,.0f}, with {cl_pct}% confidence the actual "
-            f"value will fall between ${lower_bound[0]:,.0f} and "
+            f"value will fall between ${lower_display[0]:,.0f} and "
             f"${upper_bound[0]:,.0f}."
         )
     else:
         total_pt = sum(max(0, v) for v in point_forecast)
-        total_lo = sum(max(0, v) for v in lower_bound)
-        total_hi = sum(v for v in upper_bound)
+        total_lo = sum(lower_display)
+        total_hi = sum(upper_bound)
         period = (
             f"{forecast_dates[0]} – {forecast_dates[-1]}"
             if steps > 1 else forecast_dates[0]
@@ -525,7 +574,7 @@ def _train_forecast(
     aic = round(float(fit.aic), 2) if hasattr(fit, "aic") else None
 
     plot_path = _plot_forecast(
-        series, forecast_dates, point_forecast, lower_bound, upper_bound,
+        series, forecast_dates, point_forecast, lower_display, upper_bound,
         "charts", confidence_level,
     )
 
