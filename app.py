@@ -1,6 +1,7 @@
 """Multi-Agent Query Engine — Streamlit UI for the full agent pipeline."""
 
 import os
+import traceback
 
 import anthropic
 import streamlit as st
@@ -170,6 +171,7 @@ if question := st.chat_input("Ask a question about your data..."):
                 st.session_state.messages.append({"role": "assistant", "content": reply})
                 st.stop()
             except Exception:
+                traceback.print_exc()  # emits full stack trace to Streamlit Cloud logs
                 reply = "Something went wrong while answering that question. Please try again."
                 st.markdown(reply)
                 st.session_state.messages.append({"role": "assistant", "content": reply})
