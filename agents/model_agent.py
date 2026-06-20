@@ -479,6 +479,15 @@ def _train_forecast(
     n_obs = len(series)
     confidence_level = 1.0 - alpha
 
+    MIN_OBS_REQUIRED = 4
+    if n_obs < MIN_OBS_REQUIRED:
+        return _err(
+            f"Insufficient data for forecasting: only {n_obs} monthly "
+            f"observation(s) found, but at least {MIN_OBS_REQUIRED} are needed. "
+            "Try a broader date range or check the query results.",
+            task_type="forecast", sql=sql,
+        )
+
     # ── Model selection ───────────────────────────────────────────────────────
     # Seasonal SARIMAX(1,1,1)(1,1,1,12) needs at least 2 full seasonal cycles
     # plus headroom for differencing: 2×12 + 10 = 34 obs minimum.

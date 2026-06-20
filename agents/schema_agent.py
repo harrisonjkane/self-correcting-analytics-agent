@@ -10,6 +10,12 @@ def get_schema(db_path: str) -> str:
 
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
     tables = [row[0] for row in cursor.fetchall()]
+    if not tables:
+        conn.close()
+        raise RuntimeError(
+            f"No tables found in database at '{db_path}'. "
+            "The file may be missing, empty, or corrupted."
+        )
 
     parts = []
     for table in tables:
@@ -42,6 +48,12 @@ def get_schema_with_enums(db_path: str) -> str:
 
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
     tables = [row[0] for row in cursor.fetchall()]
+    if not tables:
+        conn.close()
+        raise RuntimeError(
+            f"No tables found in database at '{db_path}'. "
+            "The file may be missing, empty, or corrupted."
+        )
 
     parts = []
     for table in tables:

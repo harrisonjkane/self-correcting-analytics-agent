@@ -145,6 +145,7 @@ def run_pipeline(
     sql = None
     prev_rejected_sql = None
     prev_rejection_reason = None
+    review = {"passed": True, "reason": "", "tokens_used": 0}  # safe default before loop
 
     for attempt in range(MAX_ATTEMPTS):
         gen_resp = client.messages.create(
@@ -189,6 +190,25 @@ def run_pipeline(
                 ),
             }
         )
+
+    # ── Guard: never execute SQL the Critic rejected on all attempts ─────────
+    if not review["passed"]:
+        return {
+            "answer": None,
+            "explanation": None,
+            "sql": sql,
+            "raw_result": None,
+            "tokens_used": tokens,
+            "retries": retries,
+            "rag_hits": len(similar_corrections),
+            "critic_warnings": critic_warnings,
+            "error": (
+                f"Couldn't generate a valid query after {MAX_ATTEMPTS} attempts "
+                f"(last issue: {critic_warnings}). Try rephrasing your question."
+            ),
+            "chart_path": None,
+            "model_result": None,
+        }
 
     # ── Step 4: Execute SQL ───────────────────────────────────────────────────
     try:

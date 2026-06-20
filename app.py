@@ -14,6 +14,18 @@ load_dotenv()
 
 DB_PATH = "data/analytics.db"
 
+
+def _get_api_key(key: str) -> str | None:
+    """Check Streamlit Secrets first (for deployed apps), then fall back to env."""
+    try:
+        val = st.secrets.get(key)
+        if val:
+            return val
+    except Exception:
+        pass  # st.secrets raises if secrets.toml is absent
+    return os.environ.get(key)
+
+
 EXAMPLE_QUESTIONS = [
     q["question"] for q in BENCHMARK if q["tier"] in (1, 2, 3)
 ][:6]
@@ -38,7 +50,7 @@ st.markdown(
 
 # ── Session state init ────────────────────────────────────────────────────────
 if "ready" not in st.session_state:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = _get_api_key("ANTHROPIC_API_KEY")
     if not api_key:
         st.session_state.ready = False
         st.session_state.init_error = "ANTHROPIC_API_KEY is not set in .env"
@@ -66,23 +78,26 @@ with st.sidebar:
 
     st.subheader("Database Schema")
     if st.session_state.get("ready"):
-        for line in st.session_state.schema.splitlines()[1:]:  # skip "Tables:" header
-            line = line.strip()
-            if not line:
-                continue
-            table_part, _, fk_raw = line.partition(" -- FK: ")
-            paren = table_part.index("(")
-            table_name = table_part[:paren]
-            cols_str = table_part[paren + 1 : -1]
-            cols = [c.strip() for c in cols_str.split(", ")]
-            with st.expander(table_name):
-                for col in cols:
-                    name, _, col_type = col.partition(" ")
-                    st.markdown(f"**`{name}`** {col_type}")
-                if fk_raw:
-                    st.markdown("**Foreign keys:**")
-                    for fk in fk_raw.split("; "):
-                        st.markdown(f"- `{fk.strip()}`")
+        try:
+            for line in st.session_state.schema.splitlines()[1:]:  # skip "Tables:" header
+                line = line.strip()
+                if not line:
+                    continue
+                table_part, _, fk_raw = line.partition(" -- FK: ")
+                paren = table_part.index("(")
+                table_name = table_part[:paren]
+                cols_str = table_part[paren + 1 : -1]
+                cols = [c.strip() for c in cols_str.split(", ")]
+                with st.expander(table_name):
+                    for col in cols:
+                        name, _, col_type = col.partition(" ")
+                        st.markdown(f"**`{name}`** {col_type}")
+                    if fk_raw:
+                        st.markdown("**Foreign keys:**")
+                        for fk in fk_raw.split("; "):
+                            st.markdown(f"- `{fk.strip()}`")
+        except Exception:
+            st.caption("Schema display error — check application logs.")
     else:
         st.caption("Schema unavailable — check startup error above.")
 
@@ -130,6 +145,30 @@ if question := st.chat_input("Ask a question about your data..."):
                     db_path=DB_PATH,
                     client=st.session_state.client,
                 )
+            except anthropic.AuthenticationError:
+                reply = (
+                    "API authentication failed — your ANTHROPIC_API_KEY may be invalid "
+                    "or expired. Check your `.env` file or Streamlit Secrets and refresh."
+                )
+                st.error(reply)
+                st.session_state.messages.append({"role": "assistant", "content": reply})
+                st.stop()
+            except anthropic.RateLimitError:
+                reply = (
+                    "The Anthropic API rate limit was reached. "
+                    "Please wait a moment and try again."
+                )
+                st.markdown(reply)
+                st.session_state.messages.append({"role": "assistant", "content": reply})
+                st.stop()
+            except anthropic.APIConnectionError:
+                reply = (
+                    "Could not connect to the Anthropic API — "
+                    "check your internet connection and try again."
+                )
+                st.markdown(reply)
+                st.session_state.messages.append({"role": "assistant", "content": reply})
+                st.stop()
             except Exception:
                 reply = "Something went wrong while answering that question. Please try again."
                 st.markdown(reply)
