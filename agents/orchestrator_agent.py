@@ -15,6 +15,7 @@ from agents.chart_agent import create_chart
 from agents.critic_agent import review_sql
 from agents.correction_log import log_correction, retrieve_similar_corrections
 from agents.explainer_agent import explain
+from agents.model_agent import should_model, train_model
 
 MODEL = "claude-sonnet-4-6"
 MAX_ATTEMPTS = 3  # initial generation + up to 2 corrective regenerations
@@ -24,7 +25,7 @@ You are a routing agent for a B2B SaaS analytics system. Given a business questi
 and a brief schema summary, decide which downstream agents are needed.
 
 Return ONLY a JSON object — no markdown fences, no explanation:
-{"needs_sql": true, "needs_chart": <bool>, "reasoning": "<one sentence>"}
+{"needs_sql": true, "needs_chart": <bool>, "needs_model": <bool>, "reasoning": "<one sentence>"}
 
 needs_sql is always true — every question in this system requires SQL.
 
@@ -35,6 +36,11 @@ displaying a ranked list visually:
   compare", "distribution", "over time".
   FALSE signals: "how many", "what is the total", "what is the average",
   "which one", "who has the most", "is our", single-value lookups.
+
+needs_model is true ONLY for explicitly predictive or unsupervised-learning questions.
+  TRUE signals: "predict", "forecast", "likely to", "classify", "cluster",
+  "regression", "machine learning", "segment customers by behavior", "churn prediction".
+  FALSE for all descriptive, aggregation, or lookup questions — the vast majority.
 
 reasoning is one sentence for logging only — never shown to users."""
 
@@ -58,8 +64,9 @@ Return ONLY the JSON object. No explanation."""
 def plan(question: str, schema_context: str, client: anthropic.Anthropic) -> dict:
     """
     Analyze the question and decide which agents are needed.
-    Returns {"needs_sql": bool, "needs_chart": bool, "reasoning": str, "tokens_used": int}.
-    Fails safe: on parse error, returns needs_chart=False so the core pipeline always runs.
+    Returns {"needs_sql": bool, "needs_chart": bool, "needs_model": bool,
+             "reasoning": str, "tokens_used": int}.
+    Fails safe on parse error: needs_chart and needs_model default to False.
     """
     resp = client.messages.create(
         model=MODEL,
@@ -83,7 +90,8 @@ def plan(question: str, schema_context: str, client: anthropic.Anthropic) -> dic
         return {
             "needs_sql": True,
             "needs_chart": False,
-            "reasoning": "parse_error — defaulting to no chart",
+            "needs_model": False,
+            "reasoning": "parse_error — defaulting to no chart/model",
             "tokens_used": tokens,
         }
 
@@ -198,6 +206,7 @@ def run_pipeline(
             "critic_warnings": critic_warnings,
             "error": str(exc),
             "chart_path": None,
+            "model_result": None,
         }
 
     # ── Step 5: Extract typed answer ──────────────────────────────────────────
@@ -241,6 +250,15 @@ def run_pipeline(
         except Exception:
             pass  # chart failure must never block the result
 
+    # ── Step 8: Model — separate path, gated by plan AND keyword safety check ─
+    model_result = None
+    needs_model = plan_result.get("needs_model", False) or should_model(question)
+    if needs_model:
+        try:
+            model_result = train_model(question, schema_with_enums, db_path, client)
+        except Exception:
+            pass  # model failure must never block the result
+
     return {
         "answer": answer,
         "explanation": explanation,
@@ -252,4 +270,5 @@ def run_pipeline(
         "critic_warnings": critic_warnings,
         "error": exec_error,
         "chart_path": chart_path,
+        "model_result": model_result,
     }
