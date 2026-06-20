@@ -58,7 +58,7 @@ try:
 finally:
     os.unlink(empty_db)
 
-# Also verify that a genuinely missing path (never created) is handled
+# Verify that a missing path raises BEFORE sqlite3.connect() creates a stray file
 missing_path = "/tmp/_test_db_does_not_exist_XYZXYZ.db"
 if os.path.exists(missing_path):
     os.remove(missing_path)
@@ -67,6 +67,10 @@ try:
     fail("get_schema() on nonexistent path did not raise")
 except RuntimeError as e:
     print(f"  {PASS}  [missing path] raised RuntimeError: {e}")
+    if os.path.exists(missing_path):
+        fail("stray empty file was created on disk before the error fired")
+    else:
+        print(f"  {PASS}  [missing path] no stray file created — error fired before sqlite3.connect()")
 except Exception as e:
     fail(f"get_schema() on missing path raised {type(e).__name__}: {e}")
 finally:

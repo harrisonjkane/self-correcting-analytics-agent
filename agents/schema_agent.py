@@ -1,10 +1,21 @@
 """Inspects the database schema and returns formatted strings for use in prompts."""
 
+import os
 import sqlite3
+
+
+def _check_db_exists(db_path: str) -> None:
+    """Raise before sqlite3.connect() can create a stray empty file."""
+    if not os.path.exists(db_path):
+        raise RuntimeError(
+            f"Database file not found at '{db_path}'. "
+            "Make sure the file path is correct and the database has been seeded."
+        )
 
 
 def get_schema(db_path: str) -> str:
     """Basic schema: table definitions + FK notes. Used for SQL generation."""
+    _check_db_exists(db_path)
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
@@ -14,7 +25,7 @@ def get_schema(db_path: str) -> str:
         conn.close()
         raise RuntimeError(
             f"No tables found in database at '{db_path}'. "
-            "The file may be missing, empty, or corrupted."
+            "The file may be empty or corrupted."
         )
 
     parts = []
@@ -43,6 +54,7 @@ def get_schema_with_enums(db_path: str) -> str:
     Used by the Critic so it can verify string literal case and filter logic
     against the actual values in the database.
     """
+    _check_db_exists(db_path)
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
@@ -52,7 +64,7 @@ def get_schema_with_enums(db_path: str) -> str:
         conn.close()
         raise RuntimeError(
             f"No tables found in database at '{db_path}'. "
-            "The file may be missing, empty, or corrupted."
+            "The file may be empty or corrupted."
         )
 
     parts = []
