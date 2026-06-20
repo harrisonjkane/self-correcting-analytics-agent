@@ -1,10 +1,12 @@
 """
 Critic Agent — reviews generated SQL before execution.
 
-Checks for the three failure modes observed in the Phase 1 baseline:
-  1. String literal case mismatches vs actual stored values
-  2. Filter logic errors (exclusion when inclusion is needed)
-  3. DDL/DML safety (defense-in-depth on top of the read-only connection)
+Two-layer design:
+  LAYER 1 — Schema-derived checks: general-purpose, reusable across any database.
+             Derives correctness entirely from schema enum values and question wording.
+  LAYER 2 — Domain knowledge rules: business-specific, requires maintenance as
+             business logic changes. Documents assumptions that cannot be inferred
+             from schema or question text alone.
 """
 
 import json
@@ -15,38 +17,67 @@ MODEL = "claude-sonnet-4-6"
 
 _CRITIC_SYSTEM = """\
 You are a SQL quality critic for a SQLite analytics database.
-You will receive a SQL query and a schema that includes the exact stored values
-for categorical columns. Check the SQL for exactly three categories of errors:
+You will receive the original business question, the database schema (including
+the exact stored values for categorical columns), and the SQL to review.
+
+Your checks are organized in two layers:
+
+## LAYER 1: SCHEMA-DERIVED CHECKS
+## (General-purpose — derived from schema enum values and question wording only.
+##  These checks are reusable across any database with the same schema.)
 
 1. STRING LITERAL CASE
    Every string value in WHERE / HAVING / JOIN ... ON clauses must EXACTLY match
    the stored values shown in the schema (SQLite string comparisons are
-   case-sensitive by default). If the schema shows priority stored values are
-   'Critical', 'High', 'Low', 'Medium', then WHERE priority = 'critical' is WRONG.
+   case-sensitive by default). If stored priority values are 'Critical', 'High',
+   'Low', 'Medium', then WHERE priority = 'critical' is WRONG.
 
 2. FILTER LOGIC
-   When a question targets one specific category value, the WHERE clause must use
-   direct equality (= 'X'), NOT exclusion (!= 'Y' or NOT IN ('Y')), because
-   exclusion silently includes every other value.
-   Example violation: WHERE status != 'Cancelled' when the intent is
-   status = 'Completed' — this also returns 'Pending' and 'Refunded' rows.
+   Read the original question. If the question targets a specific subset of rows
+   identified by a categorical column value (e.g. "completed orders", "critical
+   tickets", "Hardware products"), the WHERE clause must use direct equality
+   (= 'X'), NOT exclusion (!= 'Y' or NOT IN ('Y')), because exclusion silently
+   includes every other category value.
+   Example: question asks for "completed orders" — WHERE status != 'Cancelled'
+   is WRONG because it also includes 'Pending' and 'Refunded' rows.
 
 3. DDL / DML SAFETY
    The query must contain only SELECT statements. Any INSERT, UPDATE, DELETE,
    DROP, ALTER, CREATE, or TRUNCATE is a violation.
 
+## LAYER 2: DOMAIN KNOWLEDGE RULES
+## (Business-specific — encodes assumptions that cannot be derived from the
+##  schema or question text alone. Must be reviewed and updated whenever the
+##  underlying business logic changes.)
+
+4. REVENUE IMPLIES COMPLETED STATUS
+   In this B2B SaaS database, "revenue" means recognised revenue only.
+   Any query that computes revenue — SUM of order_items quantities × prices,
+   average order value, or customer ranking by spend — MUST filter orders by
+   status = 'Completed'. Pending, Cancelled, and Refunded orders are not
+   recognised revenue. If a revenue query joins orders and order_items without
+   WHERE orders.status = 'Completed', it is a violation, even if the question
+   does not use the word "completed".
+
 Respond with ONLY a JSON object — no markdown fences, no explanation:
   {"passed": true, "reason": ""}
-  {"passed": false, "reason": "<category name>: <specific description of the issue>"}
+  {"passed": false, "reason": "<check name>: <specific description of the issue>"}
 
 Report the first failing check you find. Do not list multiple issues."""
 
 
-def review_sql(sql: str, schema_context: str, client: anthropic.Anthropic) -> dict:
+def review_sql(
+    sql: str,
+    schema_context: str,
+    client: anthropic.Anthropic,
+    question: str = "",
+) -> dict:
     """
-    Reviews sql against schema_context (which must include stored enum values).
+    Reviews sql against schema_context and the original question.
+    question is required for the MISSING FILTER check; always pass it.
     Returns {"passed": bool, "reason": str, "tokens_used": int}.
     """
+    question_line = f"Original question: {question}\n\n" if question else ""
     resp = client.messages.create(
         model=MODEL,
         max_tokens=256,
@@ -56,6 +87,7 @@ def review_sql(sql: str, schema_context: str, client: anthropic.Anthropic) -> di
             {
                 "role": "user",
                 "content": (
+                    f"{question_line}"
                     f"Schema (with stored values):\n{schema_context}"
                     f"\n\nSQL to review:\n{sql}"
                 ),
@@ -69,6 +101,4 @@ def review_sql(sql: str, schema_context: str, client: anthropic.Anthropic) -> di
         result["tokens_used"] = tokens
         return result
     except (json.JSONDecodeError, AttributeError):
-        # If the Critic fails to return valid JSON, pass the SQL through rather
-        # than blocking execution on a harness bug.
         return {"passed": True, "reason": "", "tokens_used": tokens, "parse_error": True}

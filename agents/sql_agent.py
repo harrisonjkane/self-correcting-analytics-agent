@@ -97,7 +97,7 @@ def ask(
         tokens += gen_resp.usage.input_tokens + gen_resp.usage.output_tokens
 
         # ── Critic review ─────────────────────────────────────────────────────
-        review = review_sql(sql, schema_with_enums, client)
+        review = review_sql(sql, schema_with_enums, client, question=question)
         tokens += review.get("tokens_used", 0)
 
         if review["passed"]:

@@ -4,6 +4,8 @@ __pycache__/
 *.pyc
 *.pyo
 data/analytics.db
+chroma_db/
 evals/results/*.json
+evals/results/*.jsonl
 *.egg-info/
 .DS_Store
