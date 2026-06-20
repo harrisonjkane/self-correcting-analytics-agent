@@ -37,9 +37,10 @@ displaying a ranked list visually:
   FALSE signals: "how many", "what is the total", "what is the average",
   "which one", "who has the most", "is our", single-value lookups.
 
-needs_model is true ONLY for explicitly predictive or unsupervised-learning questions.
+needs_model is true ONLY for explicitly predictive, forecasting, or unsupervised-learning questions.
   TRUE signals: "predict", "forecast", "likely to", "classify", "cluster",
-  "regression", "machine learning", "segment customers by behavior", "churn prediction".
+  "regression", "machine learning", "segment customers by behavior", "churn prediction",
+  "next quarter", "next month", "trend over time", "confidence interval", "project revenue".
   FALSE for all descriptive, aggregation, or lookup questions — the vast majority.
 
 reasoning is one sentence for logging only — never shown to users."""

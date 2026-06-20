@@ -20,6 +20,7 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 from agents.critic_agent import review_sql
 
@@ -38,30 +39,50 @@ _MODELING_KEYWORDS = frozenset({
     "group customers by behavior", "segment customers by", "regression",
     "churn prediction", "machine learning", "ml model", "identify patterns",
     "propensity", "probability of",
+    # forecast-specific
+    "next month", "next quarter", "next year", "trend over time",
+    "predict future", "confidence interval", "project revenue",
 })
 
 _MODEL_PLAN_SYSTEM = """\
 You are a machine learning planning agent for a B2B SaaS analytics database.
 Given a business question and database schema, produce a concrete ML training plan.
 
-Return ONLY a JSON object — no markdown fences, no explanation:
+Return ONLY a JSON object — no markdown fences, no explanation — with ALL of these keys
+(use null for keys that do not apply to the chosen task type):
 {
-  "task_type": "regression" | "classification" | "clustering",
+  "task_type": "regression" | "classification" | "clustering" | "forecast",
   "sql": "<valid SQLite SELECT query — no semicolons, no markdown>",
-  "model_class": "LinearRegression" | "RandomForestRegressor" | "LogisticRegression" | "RandomForestClassifier" | "KMeans",
-  "target_column": "<column alias that will appear in SELECT results, null for clustering>",
-  "feature_columns": ["<column alias 1>", "<column alias 2>", ...],
+  "model_class": "LinearRegression" | "RandomForestRegressor" | "LogisticRegression" | "RandomForestClassifier" | "KMeans" | "SARIMAX",
+  "target_column": "<column alias for supervised target, null for clustering/forecast>",
+  "feature_columns": ["<alias>", ...],
+  "date_column": "<period alias for time-series, null for non-forecast tasks>",
+  "value_column": "<metric alias for time-series, null for non-forecast tasks>",
   "n_clusters": <int 3-5 for KMeans, null otherwise>
 }
 
-Rules:
-- SQL column aliases must exactly match the feature_columns and target_column names you list.
-- For "predict order value based on quantity and category": SELECT quantity, category,
-  ROUND(quantity * unit_price, 2) AS order_value ... (alias the computed target).
-- Prefer RandomForest over linear models (better handles nonlinearity and categoricals).
-- Use LogisticRegression only if the target is binary. Use KMeans for "cluster/group" questions.
-- Include WHERE orders.status = 'Completed' for any revenue/order-value target.
-- SQL must be a bare SELECT — no markdown, no semicolon."""
+Rules for ALL tasks:
+- SQL column aliases must exactly match every column name you list in the JSON.
+- SQL must be a bare SELECT — no markdown, no semicolons.
+- Include WHERE orders.status = 'Completed' for any revenue/order-value computation.
+
+Rules for FORECAST tasks (task_type = "forecast"):
+- SQL must return exactly two columns: (date_period, numeric_value) ordered by date_period ASC.
+- Use strftime('%Y-%m', date_col) for monthly aggregation, aliased as "period".
+- Alias the aggregated value (e.g. SUM of revenue) as "revenue" or another clear name.
+- Set model_class = "SARIMAX", target_column = null, feature_columns = [].
+- Set date_column to the period alias and value_column to the metric alias.
+- Example: SELECT strftime('%Y-%m', o.order_date) AS period,
+           ROUND(SUM(oi.quantity * oi.unit_price), 2) AS revenue
+           FROM order_items oi JOIN orders o ON oi.order_id = o.order_id
+           WHERE o.status = 'Completed' GROUP BY 1 ORDER BY 1
+
+Rules for REGRESSION/CLASSIFICATION tasks:
+- Prefer RandomForest over linear models.
+- Use LogisticRegression only for binary targets.
+
+Rules for CLUSTERING:
+- Use KMeans, n_clusters 3-5."""
 
 
 def should_model(question: str) -> bool:
@@ -152,6 +173,8 @@ def train_model(
     feature_columns = plan.get("feature_columns") or []
     target_column = plan.get("target_column")
     n_clusters = plan.get("n_clusters") or 3
+    date_column = plan.get("date_column") or "period"
+    value_column = plan.get("value_column") or "revenue"
 
     # ── Step 2: Critic review of training SQL ────────────────────────────────
     review = review_sql(sql, schema_with_enums, client, question=question)
@@ -172,17 +195,22 @@ def train_model(
     if df.empty:
         return _err("training query returned no rows", task_type=task_type, sql=sql)
 
-    # Resolve feature_columns to what's actually in the DataFrame
-    available = set(df.columns)
-    features = [c for c in feature_columns if c in available]
-    if not features:
-        # Fallback: all numeric columns except target
-        features = [c for c in df.select_dtypes(include=[np.number]).columns if c != target_column]
-    if not features:
-        return _err("no usable feature columns found in query result", task_type=task_type, sql=sql)
-
     # ── Step 4: Train ─────────────────────────────────────────────────────────
     try:
+        if task_type == "forecast":
+            steps, alpha = _parse_forecast_params(question)
+            return _train_forecast(df, date_column, value_column, sql, question, steps, alpha)
+
+        # For supervised/unsupervised tasks: resolve feature columns
+        available = set(df.columns)
+        features = [c for c in feature_columns if c in available]
+        if not features:
+            features = [c for c in df.select_dtypes(include=[np.number]).columns
+                        if c != target_column]
+        if not features:
+            return _err("no usable feature columns found in query result",
+                        task_type=task_type, sql=sql)
+
         if task_type == "regression":
             return _train_regression(df, features, target_column, model_class_name, sql)
         elif task_type == "classification":
@@ -309,6 +337,219 @@ def _train_clustering(df, features, n_clusters, sql):
         "task_type": "clustering", "metrics": metrics,
         "plot_path": plot_path, "summary": summary,
         "sql": sql, "model_class": "KMeans", "error": None,
+    }
+
+
+def _parse_forecast_params(question: str) -> tuple[int, float]:
+    """Parse (steps, alpha) from question phrasing. Defaults: 3 steps, 0.05 alpha (95% CI)."""
+    q = question.lower()
+    steps = 3  # default: one quarter
+    if "next month" in q:
+        steps = 1
+    elif "next year" in q or "12 month" in q:
+        steps = 12
+    elif "6 month" in q or "six month" in q or "half year" in q:
+        steps = 6
+    # "next quarter" / "q1/q2/q3/q4" stays at default 3
+
+    alpha = 0.05  # default: 95% CI
+    if "90%" in q or "90 percent" in q:
+        alpha = 0.10
+    elif "99%" in q or "99 percent" in q:
+        alpha = 0.01
+
+    return steps, alpha
+
+
+def _plot_forecast(
+    series: pd.Series,
+    forecast_dates: list[str],
+    point_forecast: list[float],
+    lower_bound: list[float],
+    upper_bound: list[float],
+    chart_dir: str,
+    confidence_level: float = 0.95,
+) -> str | None:
+    os.makedirs(chart_dir, exist_ok=True)
+    path = os.path.join(chart_dir, f"{uuid.uuid4().hex}.png")
+    try:
+        n_show = min(18, len(series))
+        hist = series.iloc[-n_show:]
+        fc_dates = pd.to_datetime([d + "-01" for d in forecast_dates])
+        cl_pct = int(confidence_level * 100)
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+
+        # Historical line
+        ax.plot(hist.index, hist.values, color="#2E75B6", lw=2, label="Historical")
+
+        # Bridge from last historical point to first forecast point
+        ax.plot(
+            [hist.index[-1], fc_dates[0]],
+            [hist.iloc[-1], point_forecast[0]],
+            color="#2E75B6", lw=2, linestyle="--",
+        )
+        # Forecast line
+        ax.plot(fc_dates, point_forecast, color="#2E75B6", lw=2,
+                linestyle="--", label="Forecast")
+        # Confidence band (forecast portion only)
+        ax.fill_between(fc_dates, lower_bound, upper_bound,
+                        color="#2E75B6", alpha=0.18, label=f"{cl_pct}% CI")
+
+        ax.set_xlabel("Month")
+        ax.set_ylabel("Revenue ($)")
+        ax.set_title("Monthly Revenue Forecast")
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"${x:,.0f}"))
+        ax.legend()
+        plt.xticks(rotation=30)
+        plt.tight_layout()
+        plt.savefig(path, bbox_inches="tight", dpi=150)
+    finally:
+        plt.close("all")
+    return path if os.path.exists(path) else None
+
+
+def _train_forecast(
+    df: pd.DataFrame,
+    date_column: str,
+    value_column: str,
+    sql: str,
+    question: str,
+    steps: int = 3,
+    alpha: float = 0.05,
+) -> dict:
+    import warnings
+
+    if date_column not in df.columns or value_column not in df.columns:
+        missing = [c for c in (date_column, value_column) if c not in df.columns]
+        return _err(f"columns {missing} not found in query result (got {list(df.columns)})",
+                    task_type="forecast", sql=sql)
+
+    # Build a complete monthly DatetimeIndex, fill any gaps with 0
+    df[date_column] = pd.to_datetime(df[date_column].astype(str) + "-01")
+    df[value_column] = pd.to_numeric(df[value_column], errors="coerce").fillna(0.0)
+    series = df.set_index(date_column)[value_column].sort_index()
+    full_idx = pd.date_range(series.index.min(), series.index.max(), freq="MS")
+    n_gaps = len(full_idx) - len(series)
+    series = series.reindex(full_idx, fill_value=0.0)
+
+    n_obs = len(series)
+    confidence_level = 1.0 - alpha
+
+    # ── Model selection ───────────────────────────────────────────────────────
+    # Seasonal SARIMAX(1,1,1)(1,1,1,12) needs at least 2 full seasonal cycles
+    # plus headroom for differencing: 2×12 + 10 = 34 obs minimum.
+    MIN_FOR_SEASONAL = 34
+    seasonal_attempted = n_obs >= MIN_FOR_SEASONAL
+    model_used = None
+    fallback_reason = None
+
+    if seasonal_attempted:
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                fit = SARIMAX(
+                    series,
+                    order=(1, 1, 1),
+                    seasonal_order=(1, 1, 1, 12),
+                    enforce_stationarity=False,
+                    enforce_invertibility=False,
+                ).fit(disp=False, maxiter=300)
+            model_used = "SARIMAX(1,1,1)(1,1,1,12)"
+        except Exception as exc:
+            fallback_reason = f"SARIMAX seasonal fit failed ({exc}); fell back to ARIMA(1,1,1)"
+            seasonal_attempted = False
+
+    if not seasonal_attempted:
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                fit = SARIMAX(
+                    series,
+                    order=(1, 1, 1),
+                    seasonal_order=(0, 0, 0, 0),
+                ).fit(disp=False, maxiter=300)
+            model_used = "ARIMA(1,1,1)"
+            if fallback_reason is None:
+                fallback_reason = (
+                    f"non-seasonal ARIMA used: only {n_obs} monthly observations "
+                    f"(≥{MIN_FOR_SEASONAL} required for seasonal estimation)"
+                )
+        except Exception as exc:
+            return _err(f"ARIMA fit failed: {exc}", task_type="forecast", sql=sql)
+
+    # ── Forecast ──────────────────────────────────────────────────────────────
+    try:
+        fc_obj = fit.get_forecast(steps=steps)
+        point_mean = fc_obj.predicted_mean
+        ci = fc_obj.conf_int(alpha=alpha)
+    except Exception as exc:
+        return _err(f"forecast generation failed: {exc}", task_type="forecast", sql=sql)
+
+    point_forecast = [round(float(v), 2) for v in point_mean.values]
+    lower_bound    = [round(float(v), 2) for v in ci.iloc[:, 0].values]
+    upper_bound    = [round(float(v), 2) for v in ci.iloc[:, 1].values]
+
+    last_date = series.index[-1]
+    forecast_dates = [
+        (last_date + pd.DateOffset(months=i + 1)).strftime("%Y-%m")
+        for i in range(steps)
+    ]
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    cl_pct = int(confidence_level * 100)
+    if steps == 1:
+        summary = (
+            f"We project {forecast_dates[0]} revenue of approximately "
+            f"${point_forecast[0]:,.0f}, with {cl_pct}% confidence the actual "
+            f"value will fall between ${lower_bound[0]:,.0f} and "
+            f"${upper_bound[0]:,.0f}."
+        )
+    else:
+        total_pt = sum(max(0, v) for v in point_forecast)
+        total_lo = sum(max(0, v) for v in lower_bound)
+        total_hi = sum(v for v in upper_bound)
+        period = (
+            f"{forecast_dates[0]} – {forecast_dates[-1]}"
+            if steps > 1 else forecast_dates[0]
+        )
+        summary = (
+            f"We project {period} total revenue of approximately ${total_pt:,.0f}, "
+            f"with {cl_pct}% confidence the actual value will fall between "
+            f"${total_lo:,.0f} and ${total_hi:,.0f}. "
+            f"Model: {model_used} fitted on {n_obs} monthly observations."
+        )
+    if fallback_reason:
+        summary += f" Note: {fallback_reason}."
+
+    aic = round(float(fit.aic), 2) if hasattr(fit, "aic") else None
+
+    plot_path = _plot_forecast(
+        series, forecast_dates, point_forecast, lower_bound, upper_bound,
+        "charts", confidence_level,
+    )
+
+    return {
+        "task_type": "forecast",
+        "point_forecast": point_forecast,
+        "lower_bound": lower_bound,
+        "upper_bound": upper_bound,
+        "confidence_level": confidence_level,
+        "forecast_dates": forecast_dates,
+        "plot_path": plot_path,
+        "summary": summary,
+        "sql": sql,
+        "model_class": model_used,
+        "metrics": {
+            "n_obs": n_obs,
+            "n_gaps_filled": n_gaps,
+            "model": model_used,
+            "aic": aic,
+            "seasonal_fitted": model_used is not None and "SARIMAX" in model_used,
+            "steps_ahead": steps,
+            "confidence_level": confidence_level,
+        },
+        "error": None,
     }
 
 
