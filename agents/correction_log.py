@@ -16,8 +16,12 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-import chromadb
-import voyageai
+try:
+    import chromadb
+    import voyageai
+    CHROMADB_AVAILABLE = True
+except Exception:
+    CHROMADB_AVAILABLE = False
 
 CHROMA_PATH = str(Path(__file__).parent.parent / "chroma_db")
 JSONL_PATH = Path(__file__).parent.parent / "evals" / "results" / "correction_log.jsonl"
@@ -25,14 +29,14 @@ COLLECTION_NAME = "corrections"
 VOYAGE_MODEL = "voyage-3"
 
 
-def _voyage_client() -> voyageai.Client:
+def _voyage_client() -> "voyageai.Client":
     api_key = os.environ.get("VOYAGE_API_KEY")
     if not api_key:
         raise RuntimeError("VOYAGE_API_KEY is not set.")
     return voyageai.Client(api_key=api_key)
 
 
-def _chroma_collection() -> chromadb.Collection:
+def _chroma_collection() -> "chromadb.Collection":
     client = chromadb.PersistentClient(path=CHROMA_PATH)
     return client.get_or_create_collection(
         name=COLLECTION_NAME,
@@ -47,7 +51,9 @@ def log_correction(
     error_or_reason: str,
     corrected_code: str,
 ) -> None:
-    """Embeds question and persists the correction to ChromaDB + JSONL."""
+    """Embeds question and persists the correction to ChromaDB + JSONL. No-op if chromadb unavailable."""
+    if not CHROMADB_AVAILABLE:
+        return
     vo = _voyage_client()
     embedding = vo.embed([question], model=VOYAGE_MODEL, input_type="document").embeddings[0]
 
@@ -80,8 +86,10 @@ def retrieve_similar_corrections(
 ) -> list[dict]:
     """
     Returns up to k past corrections matching agent_type, ordered by
-    cosine similarity to question. Returns [] when the log is empty.
+    cosine similarity to question. Returns [] when the log is empty or chromadb unavailable.
     """
+    if not CHROMADB_AVAILABLE:
+        return []
     collection = _chroma_collection()
     if collection.count() == 0:
         return []

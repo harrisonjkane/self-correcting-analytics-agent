@@ -5,5 +5,6 @@ matplotlib==3.11.0
 python-dotenv==1.2.2
 chromadb==0.5.7
 voyageai==0.4.1
+protobuf<=3.20.3
 scikit-learn==1.9.0
 statsmodels==0.14.6
