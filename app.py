@@ -172,7 +172,7 @@ if question := st.chat_input("Ask a question about your data..."):
                     "sql": browse["sql"],
                 })
         else:
-            with st.spinner("Analyzing..."):
+            with st.status("Analyzing...", expanded=False) as _status_box:
                 try:
                     result = ask(
                         question=question,
@@ -180,8 +180,10 @@ if question := st.chat_input("Ask a question about your data..."):
                         schema_with_enums=st.session_state.schema_with_enums,
                         db_path=DB_PATH,
                         client=st.session_state.client,
+                        _status=lambda msg: _status_box.update(label=msg),
                     )
                 except anthropic.AuthenticationError:
+                    _status_box.update(label="Authentication error", state="error")
                     reply = (
                         "API authentication failed — your ANTHROPIC_API_KEY may be invalid "
                         "or expired. Check your `.env` file or Streamlit Secrets and refresh."
@@ -190,6 +192,7 @@ if question := st.chat_input("Ask a question about your data..."):
                     st.session_state.messages.append({"role": "assistant", "content": reply})
                     st.stop()
                 except anthropic.RateLimitError:
+                    _status_box.update(label="Rate limit reached", state="error")
                     reply = (
                         "The Anthropic API rate limit was reached. "
                         "Please wait a moment and try again."
@@ -198,6 +201,7 @@ if question := st.chat_input("Ask a question about your data..."):
                     st.session_state.messages.append({"role": "assistant", "content": reply})
                     st.stop()
                 except anthropic.APIConnectionError:
+                    _status_box.update(label="Connection error", state="error")
                     reply = (
                         "Could not connect to the Anthropic API — "
                         "check your internet connection and try again."
@@ -206,6 +210,7 @@ if question := st.chat_input("Ask a question about your data..."):
                     st.session_state.messages.append({"role": "assistant", "content": reply})
                     st.stop()
                 except Exception:
+                    _status_box.update(label="Error", state="error")
                     traceback.print_exc()  # emits full stack trace to Streamlit Cloud logs
                     reply = "Something went wrong while answering that question. Please try again."
                     st.markdown(reply)

@@ -175,13 +175,14 @@ def ask(
     schema_with_enums: str,
     db_path: str,
     client: anthropic.Anthropic,
+    _status=None,
 ) -> dict:
     """
     Phase 2+ entry point — delegates all pipeline logic to the Orchestrator.
-    Signature and return shape are unchanged; all callers are unaffected.
+    _status is an optional callable(str) for live UI step updates.
     """
     from agents.orchestrator_agent import run_pipeline  # lazy import avoids circular dep
-    return run_pipeline(question, schema, schema_with_enums, db_path, client)
+    return run_pipeline(question, schema, schema_with_enums, db_path, client, _status=_status)
 
 
 def run_query(question: str, schema: str, db_path: str, client: anthropic.Anthropic) -> dict:

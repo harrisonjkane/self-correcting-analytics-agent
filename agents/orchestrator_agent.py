@@ -103,18 +103,25 @@ def run_pipeline(
     schema_with_enums: str,
     db_path: str,
     client: anthropic.Anthropic,
+    _status=None,
 ) -> dict:
     """
     Full agent pipeline: Plan → RAG → SQL+Critic loop → Execute → Extract → Explain
     → conditionally Chart.
 
     Returns the same dict shape as the previous ask() so all callers are unaffected.
+    _status is an optional callable(str) invoked at each phase for live UI updates.
     """
+    def _step(msg: str) -> None:
+        if _status:
+            _status(msg)
+
     tokens = 0
     retries = 0
     critic_warnings = None
 
     # ── Step 1: Plan ─────────────────────────────────────────────────────────
+    _step("Planning query...")
     plan_result = plan(question, schema, client)
     tokens += plan_result.get("tokens_used", 0)
 
@@ -141,6 +148,7 @@ def run_pipeline(
         system = f"{_SQL_SYSTEM}\n\n{rag_block}"
 
     # ── Step 3: SQL generation + Critic self-correction loop ──────────────────
+    _step("Generating SQL...")
     messages = [{"role": "user", "content": f"{schema}\n\nQuestion: {question}"}]
     sql = None
     prev_rejected_sql = None
@@ -148,6 +156,8 @@ def run_pipeline(
     review = {"passed": True, "reason": "", "tokens_used": 0}  # safe default before loop
 
     for attempt in range(MAX_ATTEMPTS):
+        if attempt > 0:
+            _step(f"Revising SQL (attempt {attempt + 1})...")
         gen_resp = client.messages.create(
             model=MODEL,
             max_tokens=512,
@@ -157,6 +167,7 @@ def run_pipeline(
         sql = gen_resp.content[0].text.strip()
         tokens += gen_resp.usage.input_tokens + gen_resp.usage.output_tokens
 
+        _step("Reviewing SQL...")
         review = review_sql(sql, schema_with_enums, client, question=question)
         tokens += review.get("tokens_used", 0)
 
@@ -211,6 +222,7 @@ def run_pipeline(
         }
 
     # ── Step 4: Execute SQL ───────────────────────────────────────────────────
+    _step("Executing query...")
     try:
         conn = sqlite3.connect(db_path)
         rows = conn.execute(sql).fetchall()
@@ -231,6 +243,7 @@ def run_pipeline(
         }
 
     # ── Step 5: Extract typed answer ──────────────────────────────────────────
+    _step("Interpreting results...")
     raw_preview = json.dumps(rows[:20], default=str)
     extract_resp = client.messages.create(
         model=MODEL,
@@ -263,6 +276,7 @@ def run_pipeline(
     # ── Step 7: Chart — gated by plan AND data-shape safety check ────────────
     chart_path = None
     if answer is not None and plan_result.get("needs_chart", False):
+        _step("Generating chart...")
         try:
             # create_chart internally calls should_chart() as a second-layer check:
             # if the orchestrator said "chart" but the data shape can't support one,
