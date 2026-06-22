@@ -29,7 +29,7 @@ def _get_api_key(key: str) -> str | None:
 
 EXAMPLE_QUESTIONS = [
     q["question"] for q in BENCHMARK if q["tier"] in (1, 2, 3)
-][:6] + ["Show revenue broken down by product category"]
+][:6] + ["Show revenue split by product category"]
 
 st.set_page_config(page_title="Multi-Agent Query Engine", page_icon="📊", layout="wide")
 
