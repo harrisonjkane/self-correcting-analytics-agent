@@ -48,6 +48,24 @@ def get_schema(db_path: str) -> str:
     return "Tables:\n" + "\n".join(parts)
 
 
+def get_sample_rows(db_path: str) -> dict[str, dict]:
+    """Return one sample row per table as {table_name: {col: value, ...}}."""
+    _check_db_exists(db_path)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+    tables = [row[0] for row in cursor.fetchall()]
+    result = {}
+    for table in tables:
+        cursor.execute(f"SELECT * FROM {table} LIMIT 1")
+        cols = [d[0] for d in cursor.description]
+        row = cursor.fetchone()
+        if row:
+            result[table] = dict(zip(cols, row))
+    conn.close()
+    return result
+
+
 def get_schema_with_enums(db_path: str) -> str:
     """Extended schema: adds distinct stored values for categorical TEXT columns.
 

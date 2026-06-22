@@ -22,7 +22,16 @@ _SQL_SYSTEM = """\
 You are a senior SQL analyst for a B2B SaaS company.
 Given a SQLite database schema and a business question, write exactly ONE SQLite
 SQL query that answers the question. Return ONLY the raw SQL — no markdown fences,
-no explanation, no trailing semicolon."""
+no explanation, no trailing semicolon.
+
+SQLite date handling — date columns (order_date, signup_date, opened_date,
+closed_date) are stored as ISO-8601 TEXT ('YYYY-MM-DD'). Use these patterns:
+  - Monthly grouping:  strftime('%Y-%m', order_date)
+  - Year grouping:     strftime('%Y', order_date)
+  - Date filtering:    date(order_date) >= date('2023-01-01')
+  - Ordering by date:  ORDER BY order_date  (ISO-8601 sorts lexicographically, so this is correct)
+  - Age in days:       julianday('now') - julianday(order_date)
+Never compare date columns as arbitrary strings; always use date() or strftime()."""
 
 _EXTRACT_SYSTEM = """\
 You are a data analyst. A SQL query was executed and returned rows of data.
@@ -33,6 +42,22 @@ and return it as a JSON object with a single key "answer" whose value is:
   - an ordered list of strings for "top N" / ranking questions
   - a dict mapping group name (string) to value (float) for "breakdown by X" questions
 Return ONLY the JSON object. No explanation."""
+
+
+_BROWSE_INTENT = frozenset({
+    "show", "print", "display", "list", "give", "fetch",
+    "get", "preview", "sample", "see", "rows", "first", "last",
+})
+# Presence of any of these alongside a table name signals analytics, not browse
+_ANALYTICS_OVERRIDE = frozenset({
+    "by", "avg", "average", "sum", "total", "count", "rank",
+    "top", "bottom", "compare", "trend", "group", "having",
+    "predict", "forecast", "breakdown",
+})
+_WORD_NUMS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
 
 
 def _table_names_from_schema(schema: str) -> list[str]:
@@ -56,40 +81,79 @@ def check_browse_request(question: str, schema: str, db_path: str) -> dict | Non
       sql         — the executed query (on success)
     """
     q = question.strip().lower()
+    words = set(re.findall(r"\w+", q))
     table_names = _table_names_from_schema(schema)
 
     limit = 10
     table = None
 
-    # "first N rows of/from X"
-    m = re.search(r"first\s+(\d+)\s+rows?\s+(?:of|from)\s+(\w+)", q)
-    if m:
+    # ── Specific patterns (checked first; unambiguous) ────────────────────────
+
+    # "first N rows of/from [the] X"  — optional "the" before table name
+    m = re.search(r"first\s+(\d+)\s+rows?\s+(?:of|from)\s+(?:the\s+)?(\w+)", q)
+    if m and m.group(2) not in ("table",):
         limit = int(m.group(1))
         table = m.group(2)
 
-    # "show me the X table" / "what's in the X table" / "what does the X table look like"
+    # "[the] X table"  — also catches unknown-table requests for a helpful error
     if table is None:
         m = re.search(r"\b(\w+)\s+table\b", q)
         if m:
-            table = m.group(1)
+            candidate = m.group(1)
+            if candidate not in ("the", "a", "this", "that"):
+                if candidate in table_names:
+                    table = candidate
+                else:
+                    return {
+                        "browse_error": (
+                            f"Table '{candidate}' not found. "
+                            f"Available tables: {', '.join(table_names)}."
+                        )
+                    }
 
-    # "show me some X data"
+    # "some X data"  — single-word capture; only fires if X is a real table
     if table is None:
         m = re.search(r"some\s+(\w+)\s+data\b", q)
-        if m:
+        if m and m.group(1) in table_names:
             table = m.group(1)
+
+    # ── General intent detection ──────────────────────────────────────────────
+    # Fire when: browse intent word present, no analytics signals, and a known
+    # table name appears in the question (exact for single-word names; prefix
+    # match for multi-word names like support_tickets vs "support ticket").
+    if table is None:
+        has_intent = bool(words & _BROWSE_INTENT)
+        has_analytics = bool(words & _ANALYTICS_OVERRIDE)
+        if has_intent and not has_analytics:
+            for tn in table_names:
+                parts = tn.split("_")
+                if len(parts) == 1:
+                    if tn in words:
+                        table = tn
+                        break
+                else:
+                    # All parts must appear; prefix match handles singular/plural
+                    if all(
+                        any(w == p or p.startswith(w) or w.startswith(p) for w in words)
+                        for p in parts
+                    ):
+                        table = tn
+                        break
 
     if table is None:
         return None
 
-    if table not in table_names:
-        return {
-            "browse_error": (
-                f"Table '{table}' not found. "
-                f"Available tables: {', '.join(table_names)}."
-            )
-        }
+    # ── Extract limit (digit wins; fall back to word number) ──────────────────
+    m = re.search(r"\b(\d+)\b", q)
+    if m:
+        limit = int(m.group(1))
+    else:
+        for word, num in _WORD_NUMS.items():
+            if word in words:
+                limit = num
+                break
 
+    # ── Execute ───────────────────────────────────────────────────────────────
     sql = f"SELECT * FROM {table} LIMIT {limit}"
     try:
         conn = sqlite3.connect(db_path)

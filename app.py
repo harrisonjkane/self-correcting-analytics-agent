@@ -7,7 +7,7 @@ import anthropic
 import streamlit as st
 from dotenv import load_dotenv
 
-from agents.schema_agent import get_schema, get_schema_with_enums
+from agents.schema_agent import get_schema, get_schema_with_enums, get_sample_rows
 from agents.sql_agent import ask, check_browse_request
 from evals.benchmark import BENCHMARK
 
@@ -29,7 +29,7 @@ def _get_api_key(key: str) -> str | None:
 
 EXAMPLE_QUESTIONS = [
     q["question"] for q in BENCHMARK if q["tier"] in (1, 2, 3)
-][:6]
+][:6] + ["Show revenue broken down by product category"]
 
 st.set_page_config(page_title="Multi-Agent Query Engine", page_icon="📊", layout="wide")
 
@@ -59,6 +59,7 @@ if "ready" not in st.session_state:
         try:
             st.session_state.schema = get_schema(DB_PATH)
             st.session_state.schema_with_enums = get_schema_with_enums(DB_PATH)
+            st.session_state.sample_rows = get_sample_rows(DB_PATH)
             st.session_state.client = anthropic.Anthropic(api_key=api_key)
             st.session_state.messages = []
             st.session_state.ready = True
@@ -97,6 +98,12 @@ with st.sidebar:
                         st.markdown("**Foreign keys:**")
                         for fk in fk_raw.split("; "):
                             st.markdown(f"- `{fk.strip()}`")
+                    sample = st.session_state.get("sample_rows", {}).get(table_name)
+                    if sample:
+                        st.markdown("**Sample row:**")
+                        for col_name, val in sample.items():
+                            display_val = str(val) if val is not None else "null"
+                            st.caption(f"`{col_name}` → {display_val}")
         except Exception:
             st.caption("Schema display error — check application logs.")
     else:
