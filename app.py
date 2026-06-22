@@ -8,7 +8,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from agents.schema_agent import get_schema, get_schema_with_enums
-from agents.sql_agent import ask
+from agents.sql_agent import ask, check_browse_request
 from evals.benchmark import BENCHMARK
 
 load_dotenv()
@@ -122,6 +122,8 @@ if not st.session_state.get("ready"):
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+        if msg["role"] == "assistant" and msg.get("browse_df") is not None:
+            st.dataframe(msg["browse_df"])
         if msg["role"] == "assistant" and msg.get("chart_path"):
             st.image(msg["chart_path"])
         if msg["role"] == "assistant" and msg.get("sql"):
@@ -137,67 +139,93 @@ if question := st.chat_input("Ask a question about your data..."):
         st.markdown(question)
 
     with st.chat_message("assistant"):
-        with st.spinner("Analyzing..."):
-            try:
-                result = ask(
-                    question=question,
-                    schema=st.session_state.schema,
-                    schema_with_enums=st.session_state.schema_with_enums,
-                    db_path=DB_PATH,
-                    client=st.session_state.client,
+        # ── Browse shortcut: bypass the full pipeline for table-scan requests ──
+        browse = check_browse_request(
+            question,
+            st.session_state.schema,
+            DB_PATH,
+        )
+        if browse is not None:
+            if browse.get("browse_error"):
+                st.markdown(browse["browse_error"])
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": browse["browse_error"]}
                 )
-            except anthropic.AuthenticationError:
-                reply = (
-                    "API authentication failed — your ANTHROPIC_API_KEY may be invalid "
-                    "or expired. Check your `.env` file or Streamlit Secrets and refresh."
-                )
-                st.error(reply)
-                st.session_state.messages.append({"role": "assistant", "content": reply})
-                st.stop()
-            except anthropic.RateLimitError:
-                reply = (
-                    "The Anthropic API rate limit was reached. "
-                    "Please wait a moment and try again."
-                )
+            else:
+                df = browse["browse_df"]
+                reply = f"Here are the first {len(df)} rows of **{browse['sql'].split('FROM')[1].split('LIMIT')[0].strip()}**:"
                 st.markdown(reply)
-                st.session_state.messages.append({"role": "assistant", "content": reply})
-                st.stop()
-            except anthropic.APIConnectionError:
-                reply = (
-                    "Could not connect to the Anthropic API — "
-                    "check your internet connection and try again."
-                )
-                st.markdown(reply)
-                st.session_state.messages.append({"role": "assistant", "content": reply})
-                st.stop()
-            except Exception:
-                traceback.print_exc()  # emits full stack trace to Streamlit Cloud logs
-                reply = "Something went wrong while answering that question. Please try again."
-                st.markdown(reply)
-                st.session_state.messages.append({"role": "assistant", "content": reply})
-                st.stop()
-
-        if result.get("error"):
-            reply = (
-                "I wasn't able to answer that question — the query didn't execute successfully. "
-                "Try rephrasing it."
-            )
-            st.markdown(reply)
-            st.session_state.messages.append({"role": "assistant", "content": reply})
+                st.dataframe(df)
+                with st.expander("View SQL"):
+                    st.code(browse["sql"], language="sql")
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": reply,
+                    "browse_df": df,
+                    "sql": browse["sql"],
+                })
         else:
-            explanation = result.get("explanation") or str(result.get("answer", "No result."))
-            st.markdown(explanation)
-            if result.get("chart_path"):
-                st.image(result["chart_path"])
-            if result.get("sql"):
-                with st.expander("View SQL & raw results"):
-                    st.code(result["sql"], language="sql")
-                    if result.get("raw_result"):
-                        st.write(result["raw_result"][:20])
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": explanation,
-                "chart_path": result.get("chart_path"),
-                "sql": result.get("sql"),
-                "raw_result": result.get("raw_result"),
-            })
+            with st.spinner("Analyzing..."):
+                try:
+                    result = ask(
+                        question=question,
+                        schema=st.session_state.schema,
+                        schema_with_enums=st.session_state.schema_with_enums,
+                        db_path=DB_PATH,
+                        client=st.session_state.client,
+                    )
+                except anthropic.AuthenticationError:
+                    reply = (
+                        "API authentication failed — your ANTHROPIC_API_KEY may be invalid "
+                        "or expired. Check your `.env` file or Streamlit Secrets and refresh."
+                    )
+                    st.error(reply)
+                    st.session_state.messages.append({"role": "assistant", "content": reply})
+                    st.stop()
+                except anthropic.RateLimitError:
+                    reply = (
+                        "The Anthropic API rate limit was reached. "
+                        "Please wait a moment and try again."
+                    )
+                    st.markdown(reply)
+                    st.session_state.messages.append({"role": "assistant", "content": reply})
+                    st.stop()
+                except anthropic.APIConnectionError:
+                    reply = (
+                        "Could not connect to the Anthropic API — "
+                        "check your internet connection and try again."
+                    )
+                    st.markdown(reply)
+                    st.session_state.messages.append({"role": "assistant", "content": reply})
+                    st.stop()
+                except Exception:
+                    traceback.print_exc()  # emits full stack trace to Streamlit Cloud logs
+                    reply = "Something went wrong while answering that question. Please try again."
+                    st.markdown(reply)
+                    st.session_state.messages.append({"role": "assistant", "content": reply})
+                    st.stop()
+
+            if result.get("error"):
+                reply = (
+                    "I wasn't able to answer that question — the query didn't execute successfully. "
+                    "Try rephrasing it."
+                )
+                st.markdown(reply)
+                st.session_state.messages.append({"role": "assistant", "content": reply})
+            else:
+                explanation = result.get("explanation") or str(result.get("answer", "No result."))
+                st.markdown(explanation)
+                if result.get("chart_path"):
+                    st.image(result["chart_path"])
+                if result.get("sql"):
+                    with st.expander("View SQL & raw results"):
+                        st.code(result["sql"], language="sql")
+                        if result.get("raw_result"):
+                            st.write(result["raw_result"][:20])
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": explanation,
+                    "chart_path": result.get("chart_path"),
+                    "sql": result.get("sql"),
+                    "raw_result": result.get("raw_result"),
+                })

@@ -10,9 +10,11 @@ identically. Only 'retries', 'critic_warnings', and 'chart_path' differ.
 """
 
 import json
+import re
 import sqlite3
 
 import anthropic
+import pandas as pd
 
 MODEL = "claude-sonnet-4-6"
 
@@ -31,6 +33,76 @@ and return it as a JSON object with a single key "answer" whose value is:
   - an ordered list of strings for "top N" / ranking questions
   - a dict mapping group name (string) to value (float) for "breakdown by X" questions
 Return ONLY the JSON object. No explanation."""
+
+
+def _table_names_from_schema(schema: str) -> list[str]:
+    """Parse table names out of the schema string returned by get_schema()."""
+    names = []
+    for line in schema.splitlines():
+        m = re.match(r"\s+(\w+)\(", line)
+        if m:
+            names.append(m.group(1).lower())
+    return names
+
+
+def check_browse_request(question: str, schema: str, db_path: str) -> dict | None:
+    """
+    Detect table-browsing requests and execute them directly, bypassing the
+    full pipeline.  Returns a result dict on match, None if not a browse request.
+
+    Result dict keys:
+      browse_df   — pandas DataFrame (on success)
+      browse_error— human-readable error string (on table-not-found or DB error)
+      sql         — the executed query (on success)
+    """
+    q = question.strip().lower()
+    table_names = _table_names_from_schema(schema)
+
+    limit = 10
+    table = None
+
+    # "first N rows of/from X"
+    m = re.search(r"first\s+(\d+)\s+rows?\s+(?:of|from)\s+(\w+)", q)
+    if m:
+        limit = int(m.group(1))
+        table = m.group(2)
+
+    # "show me the X table" / "what's in the X table" / "what does the X table look like"
+    if table is None:
+        m = re.search(r"\b(\w+)\s+table\b", q)
+        if m:
+            table = m.group(1)
+
+    # "show me some X data"
+    if table is None:
+        m = re.search(r"some\s+(\w+)\s+data\b", q)
+        if m:
+            table = m.group(1)
+
+    if table is None:
+        return None
+
+    if table not in table_names:
+        return {
+            "browse_error": (
+                f"Table '{table}' not found. "
+                f"Available tables: {', '.join(table_names)}."
+            )
+        }
+
+    sql = f"SELECT * FROM {table} LIMIT {limit}"
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute(sql)
+        cols = [d[0] for d in cursor.description]
+        rows = cursor.fetchall()
+        conn.close()
+        return {
+            "browse_df": pd.DataFrame(rows, columns=cols),
+            "sql": sql,
+        }
+    except Exception as exc:
+        return {"browse_error": str(exc)}
 
 
 def ask(
