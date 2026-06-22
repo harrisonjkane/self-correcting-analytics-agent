@@ -1,7 +1,7 @@
 """Chart Agent — generates matplotlib charts for structured query results."""
 
+import io
 import os
-import uuid
 
 import anthropic
 import matplotlib
@@ -21,7 +21,7 @@ Strict rules:
 - Do NOT write any import statements. All libraries are pre-injected:
     plt  → matplotlib.pyplot
     pd   → pandas
-  CHART_PATH is a string variable with the output file path.
+  CHART_PATH is a writable buffer — call plt.savefig(CHART_PATH, ...) to write the chart into it.
 - Use ax.bar() for grouped category comparisons and breakdowns.
 - Use ax.barh() for ranked lists (top-N) so long labels fit without rotation.
 - Never use pie charts or scatter plots.
@@ -85,19 +85,19 @@ def _format_result_for_prompt(result, raw_result=None) -> str:
 def create_chart(
     question: str,
     result,
-    chart_dir: str,
+    chart_dir: str,  # retained for call-site compatibility; no longer used
     client: anthropic.Anthropic,
     raw_result=None,
-) -> str | None:
+) -> bytes | None:
     """
     Generate, review, and execute a matplotlib chart for result.
-    Returns the saved image path, or None if no chart was produced.
+    Returns PNG bytes rendered in memory, or None if no chart was produced.
+    Renders entirely in memory — no filesystem writes.
     """
     if not should_chart(question, result):
         return None
 
-    os.makedirs(chart_dir, exist_ok=True)
-    chart_path = os.path.join(chart_dir, f"{uuid.uuid4().hex}.png")
+    buf = io.BytesIO()
     result_description = _format_result_for_prompt(result, raw_result)
 
     # ── Ask Claude to generate chart code ────────────────────────────────────
@@ -129,7 +129,7 @@ def create_chart(
     scope = {
         "plt": plt,
         "pd": pd,
-        "CHART_PATH": chart_path,
+        "CHART_PATH": buf,
         "__builtins__": _SAFE_BUILTINS,
     }
 
@@ -140,5 +140,6 @@ def create_chart(
         return None
 
     plt.close("all")
-
-    return chart_path if os.path.exists(chart_path) else None
+    buf.seek(0)
+    data = buf.read()
+    return data if data else None

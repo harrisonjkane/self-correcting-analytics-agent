@@ -131,8 +131,8 @@ for msg in st.session_state.messages:
         st.markdown(msg["content"])
         if msg["role"] == "assistant" and msg.get("browse_df") is not None:
             st.dataframe(msg["browse_df"])
-        if msg["role"] == "assistant" and msg.get("chart_path"):
-            st.image(msg["chart_path"])
+        if msg["role"] == "assistant" and msg.get("chart_bytes"):
+            st.image(msg["chart_bytes"])
         if msg["role"] == "assistant" and msg.get("sql"):
             with st.expander("View SQL & raw results"):
                 st.code(msg["sql"], language="sql")
@@ -227,8 +227,8 @@ if question := st.chat_input("Ask a question about your data..."):
             else:
                 explanation = result.get("explanation") or str(result.get("answer", "No result."))
                 st.markdown(explanation)
-                if result.get("chart_path"):
-                    st.image(result["chart_path"])
+                if result.get("chart_bytes"):
+                    st.image(result["chart_bytes"])
                 if result.get("sql"):
                     with st.expander("View SQL & raw results"):
                         st.code(result["sql"], language="sql")
@@ -237,7 +237,7 @@ if question := st.chat_input("Ask a question about your data..."):
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": explanation,
-                    "chart_path": result.get("chart_path"),
+                    "chart_bytes": result.get("chart_bytes"),
                     "sql": result.get("sql"),
                     "raw_result": result.get("raw_result"),
                 })

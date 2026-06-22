@@ -217,7 +217,7 @@ def run_pipeline(
                 f"Couldn't generate a valid query after {MAX_ATTEMPTS} attempts "
                 f"(last issue: {critic_warnings}). Try rephrasing your question."
             ),
-            "chart_path": None,
+            "chart_bytes": None,
             "model_result": None,
         }
 
@@ -238,7 +238,7 @@ def run_pipeline(
             "rag_hits": len(similar_corrections),
             "critic_warnings": critic_warnings,
             "error": str(exc),
-            "chart_path": None,
+            "chart_bytes": None,
             "model_result": None,
         }
 
@@ -259,7 +259,14 @@ def run_pipeline(
     tokens += extract_resp.usage.input_tokens + extract_resp.usage.output_tokens
 
     try:
-        answer = json.loads(extract_resp.content[0].text.strip()).get("answer")
+        extract_text = extract_resp.content[0].text.strip()
+        # Strip accidental markdown fences the model sometimes adds
+        if extract_text.startswith("```"):
+            extract_text = "\n".join(
+                line for line in extract_text.splitlines()
+                if not line.startswith("```")
+            ).strip()
+        answer = json.loads(extract_text).get("answer")
         exec_error = None
     except (json.JSONDecodeError, AttributeError):
         answer = None
@@ -274,14 +281,14 @@ def run_pipeline(
             pass  # explainer failure must never block the result
 
     # ── Step 7: Chart — gated by plan AND data-shape safety check ────────────
-    chart_path = None
+    chart_bytes = None
     if answer is not None and plan_result.get("needs_chart", False):
         _step("Generating chart...")
         try:
             # create_chart internally calls should_chart() as a second-layer check:
             # if the orchestrator said "chart" but the data shape can't support one,
             # should_chart() returns False and no chart is generated.
-            chart_path = create_chart(question, answer, "charts", client, raw_result=rows)
+            chart_bytes = create_chart(question, answer, "charts", client, raw_result=rows)
         except Exception:
             pass  # chart failure must never block the result
 
@@ -304,6 +311,6 @@ def run_pipeline(
         "rag_hits": len(similar_corrections),
         "critic_warnings": critic_warnings,
         "error": exec_error,
-        "chart_path": chart_path,
+        "chart_bytes": chart_bytes,
         "model_result": model_result,
     }
