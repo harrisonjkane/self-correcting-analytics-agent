@@ -53,6 +53,8 @@ st.markdown(
         [data-testid="stChatMessage"] p,
         [data-testid="stChatMessage"] li,
         [data-testid="stChatMessage"] span { color: #1a1a1a !important; }
+        [data-testid="stChatMessageAvatarUser"],
+        [data-testid="stChatMessageAvatarAssistant"] { display: none !important; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -196,21 +198,19 @@ if question:
                 steps_placeholder = st.empty()
                 step_log: list[tuple[str, str, str]] = []
 
-                def _render_steps() -> None:
+                def _step_lines() -> list[str]:
                     lines = []
                     for agent, status, detail in step_log:
                         if status == "running":
-                            lines.append(
-                                f"⏳&nbsp; **{agent}**"
-                                + (f" — {detail}" if detail else "")
-                            )
+                            lines.append(f"⏳&nbsp; **{agent}**" + (f" — {detail}" if detail else ""))
                         elif status == "done":
-                            lines.append(
-                                f"✅&nbsp; **{agent}**"
-                                + (f" — {detail}" if detail else "")
-                            )
+                            lines.append(f"✅&nbsp; **{agent}**" + (f" — {detail}" if detail else ""))
                         elif status == "retry":
                             lines.append(f"🔄&nbsp; **{agent}** — {detail}")
+                    return lines
+
+                def _render_steps() -> None:
+                    lines = _step_lines()
                     steps_placeholder.markdown(
                         "\n\n".join(lines) if lines else "⏳&nbsp; Starting...",
                     )
@@ -270,7 +270,13 @@ if question:
                     st.markdown(reply)
                     st.session_state.messages.append({"role": "assistant", "content": reply})
                     st.stop()
-                # Leave steps_placeholder visible — it's additive context above the answer
+
+                # Pipeline done: clear the live placeholder and render the step log
+                # as ordinary static content so the answer renders cleanly below it.
+                steps_placeholder.empty()
+                _final = _step_lines()
+                if _final:
+                    st.markdown("\n\n".join(_final))
 
             else:
                 # ── Simple progress bar (default) ─────────────────────────────
@@ -280,7 +286,7 @@ if question:
                     lines = []
                     for i, (icon, label) in enumerate(_PIPELINE_STEPS):
                         if i in done:
-                            lines.append(f"✅ ~~{label}~~")
+                            lines.append(f"✅ {label}")
                         elif i == active:
                             lines.append(f"**{icon}&nbsp; {label}...**")
                         else:
