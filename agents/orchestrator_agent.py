@@ -120,7 +120,7 @@ def run_pipeline(
 
     def _emit(agent: str, status: str, detail: str) -> None:
         if on_step:
-            on_step(agent, status, detail)
+            on_step(agent, status, str(detail) if detail is not None else "")
 
     tokens = 0
     retries = 0
@@ -227,7 +227,7 @@ def run_pipeline(
             _emit("Critic", "done", f"Passed on {attempt_str}{suffix}")
             break
 
-        critic_warnings = review["reason"]
+        critic_warnings = str(review.get("reason") or "")
         prev_rejected_sql = sql
         prev_rejection_reason = critic_warnings
 
