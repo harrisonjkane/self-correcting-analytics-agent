@@ -193,6 +193,32 @@ if question:
             show_steps = st.session_state.get("show_steps", False)
             result = None
 
+            def _render_result(result: dict) -> None:
+                if result.get("error"):
+                    reply = (
+                        "I wasn't able to answer that question — the query didn't execute successfully. "
+                        "Try rephrasing it."
+                    )
+                    st.markdown(reply)
+                    st.session_state.messages.append({"role": "assistant", "content": reply})
+                else:
+                    explanation = result.get("explanation") or str(result.get("answer", "No result."))
+                    st.markdown(explanation)
+                    if result.get("chart_bytes"):
+                        st.image(result["chart_bytes"])
+                    if result.get("sql"):
+                        with st.expander("View SQL & raw results"):
+                            st.code(result["sql"], language="sql")
+                            if result.get("raw_result"):
+                                st.write(result["raw_result"][:20])
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": explanation,
+                        "chart_bytes": result.get("chart_bytes"),
+                        "sql": result.get("sql"),
+                        "raw_result": result.get("raw_result"),
+                    })
+
             if show_steps:
                 # ── Detailed step-by-step log ─────────────────────────────────
                 steps_placeholder = st.empty()
@@ -278,6 +304,9 @@ if question:
                 if _final:
                     st.markdown("\n\n".join(_final))
 
+                with st.container():
+                    _render_result(result)
+
             else:
                 # ── Simple progress bar (default) ─────────────────────────────
                 progress_area = st.empty()
@@ -353,28 +382,4 @@ if question:
                     st.stop()
 
                 progress_area.empty()
-
-            if result.get("error"):
-                reply = (
-                    "I wasn't able to answer that question — the query didn't execute successfully. "
-                    "Try rephrasing it."
-                )
-                st.markdown(reply)
-                st.session_state.messages.append({"role": "assistant", "content": reply})
-            else:
-                explanation = result.get("explanation") or str(result.get("answer", "No result."))
-                st.markdown(explanation)
-                if result.get("chart_bytes"):
-                    st.image(result["chart_bytes"])
-                if result.get("sql"):
-                    with st.expander("View SQL & raw results"):
-                        st.code(result["sql"], language="sql")
-                        if result.get("raw_result"):
-                            st.write(result["raw_result"][:20])
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": explanation,
-                    "chart_bytes": result.get("chart_bytes"),
-                    "sql": result.get("sql"),
-                    "raw_result": result.get("raw_result"),
-                })
+                _render_result(result)
