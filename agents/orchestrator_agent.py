@@ -104,17 +104,23 @@ def run_pipeline(
     db_path: str,
     client: anthropic.Anthropic,
     _status=None,
+    on_step=None,
 ) -> dict:
     """
     Full agent pipeline: Plan → RAG → SQL+Critic loop → Execute → Extract → Explain
     → conditionally Chart.
 
     Returns the same dict shape as the previous ask() so all callers are unaffected.
-    _status is an optional callable(str) invoked at each phase for live UI updates.
+    _status: optional callable(str) for the simple live progress bar.
+    on_step: optional callable(agent, status, detail) for the detailed step log.
     """
     def _step(msg: str) -> None:
         if _status:
             _status(msg)
+
+    def _emit(agent: str, status: str, detail: str) -> None:
+        if on_step:
+            on_step(agent, status, detail)
 
     tokens = 0
     retries = 0
@@ -122,15 +128,35 @@ def run_pipeline(
 
     # ── Step 1: Plan ─────────────────────────────────────────────────────────
     _step("Planning query...")
+    _emit("Orchestrator", "running", "")
     plan_result = plan(question, schema, client)
     tokens += plan_result.get("tokens_used", 0)
+    needs_chart = plan_result.get("needs_chart", False)
+    needs_model = plan_result.get("needs_model", False) or should_model(question)
+    _emit("Orchestrator", "done",
+          f"Chart needed: {'Yes' if needs_chart else 'No'} | "
+          f"Model needed: {'Yes' if needs_model else 'No'}")
+
+    # Schema loaded at app startup — surface the table list immediately
+    _schema_tables = [
+        line.strip().split("(")[0]
+        for line in schema.splitlines()
+        if line.strip() and "(" in line
+    ]
+    _emit("Schema Agent", "done",
+          f"{len(_schema_tables)} tables loaded ({', '.join(_schema_tables)})")
 
     # ── Step 2: RAG retrieval ─────────────────────────────────────────────────
+    _emit("RAG", "running", "")
     similar_corrections = []
     try:
         similar_corrections = retrieve_similar_corrections(question, "sql", k=3)
     except Exception:
         pass  # RAG failure must never block the main pipeline
+    n_rag = len(similar_corrections)
+    _emit("RAG", "done",
+          f"{n_rag} similar past correction{'s' if n_rag != 1 else ''} retrieved"
+          if n_rag > 0 else "No prior corrections found")
 
     system = _SQL_SYSTEM
     if similar_corrections:
@@ -158,6 +184,7 @@ def run_pipeline(
     for attempt in range(MAX_ATTEMPTS):
         if attempt > 0:
             _step(f"Revising SQL (attempt {attempt + 1})...")
+        _emit("SQL Agent", "running", "")
         gen_resp = client.messages.create(
             model=MODEL,
             max_tokens=512,
@@ -166,8 +193,10 @@ def run_pipeline(
         )
         sql = gen_resp.content[0].text.strip()
         tokens += gen_resp.usage.input_tokens + gen_resp.usage.output_tokens
+        _emit("SQL Agent", "done", "Query generated")
 
         _step("Reviewing SQL...")
+        _emit("Critic", "running", "")
         review = review_sql(sql, schema_with_enums, client, question=question)
         tokens += review.get("tokens_used", 0)
 
@@ -180,6 +209,9 @@ def run_pipeline(
                     )
                 except Exception:
                     pass
+            attempt_str = "first attempt" if attempt == 0 else f"attempt {attempt + 1}"
+            _emit("Critic", "done",
+                  f"PASSED on {attempt_str} | Layer 1 + Layer 2 checks clear")
             break
 
         critic_warnings = review["reason"]
@@ -187,8 +219,12 @@ def run_pipeline(
         prev_rejection_reason = critic_warnings
 
         if attempt == MAX_ATTEMPTS - 1:
+            _emit("Critic", "retry",
+                  f"FAILED after {MAX_ATTEMPTS} attempts: {critic_warnings}")
             break
 
+        _emit("Critic", "retry",
+              f"Retry {attempt + 1}/{MAX_ATTEMPTS}: {critic_warnings}")
         retries += 1
         messages.append({"role": "assistant", "content": sql})
         messages.append(
@@ -275,26 +311,32 @@ def run_pipeline(
     # ── Step 6: Explain ───────────────────────────────────────────────────────
     explanation = None
     if answer is not None:
+        _emit("Explainer", "running", "")
         try:
             explanation = explain(question, sql, answer, client)
+            _emit("Explainer", "done", "Narrative generated")
         except Exception:
-            pass  # explainer failure must never block the result
+            _emit("Explainer", "done", "Skipped — generation error")
 
     # ── Step 7: Chart — gated by plan AND data-shape safety check ────────────
     chart_bytes = None
-    if answer is not None and plan_result.get("needs_chart", False):
+    if answer is not None and needs_chart:
         _step("Generating chart...")
+        _emit("Chart Agent", "running", "")
         try:
             # create_chart internally calls should_chart() as a second-layer check:
             # if the orchestrator said "chart" but the data shape can't support one,
             # should_chart() returns False and no chart is generated.
             chart_bytes = create_chart(question, answer, "charts", client, raw_result=rows)
+            if chart_bytes:
+                _emit("Chart Agent", "done", "Chart created, Critic-reviewed")
+            else:
+                _emit("Chart Agent", "done", "Skipped — data shape not suitable for chart")
         except Exception:
-            pass  # chart failure must never block the result
+            _emit("Chart Agent", "done", "Skipped — generation error")
 
     # ── Step 8: Model — separate path, gated by plan AND keyword safety check ─
     model_result = None
-    needs_model = plan_result.get("needs_model", False) or should_model(question)
     if needs_model:
         try:
             model_result = train_model(question, schema_with_enums, db_path, client)

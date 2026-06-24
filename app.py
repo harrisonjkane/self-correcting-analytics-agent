@@ -27,6 +27,15 @@ def _get_api_key(key: str) -> str | None:
     return os.environ.get(key)
 
 
+_PIPELINE_STEPS = [
+    ("⚙️",  "Planning your question"),
+    ("🗄️",  "Reading database schema"),
+    ("🔍",  "Checking past corrections"),
+    ("✍️",  "Writing SQL query"),
+    ("✅",  "Reviewing query"),
+    ("📊",  "Building your answer"),
+]
+
 EXAMPLE_QUESTIONS = [
     q["question"] for q in BENCHMARK if q["tier"] in (1, 2, 3)
 ][:6] + ["Show revenue split by product category"]
@@ -113,7 +122,12 @@ with st.sidebar:
 
     st.subheader("Try asking...")
     for q in EXAMPLE_QUESTIONS:
-        st.markdown(f"- {q}")
+        if st.button(q, key=f"ex_{hash(q)}", use_container_width=True):
+            st.session_state["prefilled_question"] = q
+            st.rerun()
+
+    st.divider()
+    st.toggle("Show pipeline steps", value=False, key="show_steps")
 
 # ── Main area ─────────────────────────────────────────────────────────────────
 st.title("📊 Multi-Agent Query Engine")
@@ -139,8 +153,10 @@ for msg in st.session_state.messages:
                 if msg.get("raw_result"):
                     st.write(msg["raw_result"][:20])
 
-# User input
-if question := st.chat_input("Ask a question about your data..."):
+# User input — sidebar buttons set prefilled_question; consume it before chat_input
+prefilled = st.session_state.pop("prefilled_question", None)
+question = prefilled or st.chat_input("Ask a question about your data...")
+if question:
     st.session_state.messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
         st.markdown(question)
@@ -172,7 +188,44 @@ if question := st.chat_input("Ask a question about your data..."):
                     "sql": browse["sql"],
                 })
         else:
-            with st.status("Analyzing...", expanded=False) as _status_box:
+            show_steps = st.session_state.get("show_steps", False)
+            result = None
+
+            if show_steps:
+                # ── Detailed step-by-step log ─────────────────────────────────
+                steps_placeholder = st.empty()
+                step_log: list[tuple[str, str, str]] = []
+
+                def _render_steps() -> None:
+                    lines = []
+                    for agent, status, detail in step_log:
+                        if status == "running":
+                            lines.append(
+                                f"⏳&nbsp; **{agent}**"
+                                + (f" — {detail}" if detail else "")
+                            )
+                        elif status == "done":
+                            lines.append(
+                                f"✅&nbsp; **{agent}**"
+                                + (f" — {detail}" if detail else "")
+                            )
+                        elif status == "retry":
+                            lines.append(f"🔄&nbsp; **{agent}** — {detail}")
+                    steps_placeholder.markdown(
+                        "\n\n".join(lines) if lines else "⏳&nbsp; Starting...",
+                    )
+
+                def _on_step(agent: str, status: str, detail: str) -> None:
+                    if status in ("done", "retry"):
+                        # Replace the most-recent "running" entry for this agent
+                        for i in range(len(step_log) - 1, -1, -1):
+                            if step_log[i][0] == agent and step_log[i][1] == "running":
+                                step_log[i] = (agent, status, detail)
+                                _render_steps()
+                                return
+                    step_log.append((agent, status, detail))
+                    _render_steps()
+
                 try:
                     result = ask(
                         question=question,
@@ -180,10 +233,11 @@ if question := st.chat_input("Ask a question about your data..."):
                         schema_with_enums=st.session_state.schema_with_enums,
                         db_path=DB_PATH,
                         client=st.session_state.client,
-                        _status=lambda msg: _status_box.update(label=msg),
+                        _status=None,
+                        on_step=_on_step,
                     )
                 except anthropic.AuthenticationError:
-                    _status_box.update(label="Authentication error", state="error")
+                    steps_placeholder.empty()
                     reply = (
                         "API authentication failed — your ANTHROPIC_API_KEY may be invalid "
                         "or expired. Check your `.env` file or Streamlit Secrets and refresh."
@@ -192,7 +246,7 @@ if question := st.chat_input("Ask a question about your data..."):
                     st.session_state.messages.append({"role": "assistant", "content": reply})
                     st.stop()
                 except anthropic.RateLimitError:
-                    _status_box.update(label="Rate limit reached", state="error")
+                    steps_placeholder.empty()
                     reply = (
                         "The Anthropic API rate limit was reached. "
                         "Please wait a moment and try again."
@@ -201,7 +255,7 @@ if question := st.chat_input("Ask a question about your data..."):
                     st.session_state.messages.append({"role": "assistant", "content": reply})
                     st.stop()
                 except anthropic.APIConnectionError:
-                    _status_box.update(label="Connection error", state="error")
+                    steps_placeholder.empty()
                     reply = (
                         "Could not connect to the Anthropic API — "
                         "check your internet connection and try again."
@@ -210,12 +264,89 @@ if question := st.chat_input("Ask a question about your data..."):
                     st.session_state.messages.append({"role": "assistant", "content": reply})
                     st.stop()
                 except Exception:
-                    _status_box.update(label="Error", state="error")
-                    traceback.print_exc()  # emits full stack trace to Streamlit Cloud logs
+                    steps_placeholder.empty()
+                    traceback.print_exc()
                     reply = "Something went wrong while answering that question. Please try again."
                     st.markdown(reply)
                     st.session_state.messages.append({"role": "assistant", "content": reply})
                     st.stop()
+                # Leave steps_placeholder visible — it's additive context above the answer
+
+            else:
+                # ── Simple progress bar (default) ─────────────────────────────
+                progress_area = st.empty()
+
+                def _render_progress(active: int, done: set) -> None:
+                    lines = []
+                    for i, (icon, label) in enumerate(_PIPELINE_STEPS):
+                        if i in done:
+                            lines.append(f"✅ ~~{label}~~")
+                        elif i == active:
+                            lines.append(f"**{icon}&nbsp; {label}...**")
+                        else:
+                            lines.append(
+                                f"<span style='color:#aaa'>{icon}&nbsp; {label}</span>"
+                            )
+                    progress_area.markdown("\n\n".join(lines), unsafe_allow_html=True)
+
+                def _on_status(msg: str) -> None:
+                    if "Planning" in msg:
+                        _render_progress(0, set())
+                    elif "Generating SQL" in msg or "Revising SQL" in msg:
+                        _render_progress(3, {0, 1, 2})
+                    elif "Reviewing SQL" in msg:
+                        _render_progress(4, {0, 1, 2, 3})
+                    elif "Executing" in msg or "Interpreting" in msg or "Generating chart" in msg:
+                        _render_progress(5, {0, 1, 2, 3, 4})
+
+                _render_progress(0, set())
+
+                try:
+                    result = ask(
+                        question=question,
+                        schema=st.session_state.schema,
+                        schema_with_enums=st.session_state.schema_with_enums,
+                        db_path=DB_PATH,
+                        client=st.session_state.client,
+                        _status=_on_status,
+                        on_step=None,
+                    )
+                except anthropic.AuthenticationError:
+                    progress_area.empty()
+                    reply = (
+                        "API authentication failed — your ANTHROPIC_API_KEY may be invalid "
+                        "or expired. Check your `.env` file or Streamlit Secrets and refresh."
+                    )
+                    st.error(reply)
+                    st.session_state.messages.append({"role": "assistant", "content": reply})
+                    st.stop()
+                except anthropic.RateLimitError:
+                    progress_area.empty()
+                    reply = (
+                        "The Anthropic API rate limit was reached. "
+                        "Please wait a moment and try again."
+                    )
+                    st.markdown(reply)
+                    st.session_state.messages.append({"role": "assistant", "content": reply})
+                    st.stop()
+                except anthropic.APIConnectionError:
+                    progress_area.empty()
+                    reply = (
+                        "Could not connect to the Anthropic API — "
+                        "check your internet connection and try again."
+                    )
+                    st.markdown(reply)
+                    st.session_state.messages.append({"role": "assistant", "content": reply})
+                    st.stop()
+                except Exception:
+                    progress_area.empty()
+                    traceback.print_exc()
+                    reply = "Something went wrong while answering that question. Please try again."
+                    st.markdown(reply)
+                    st.session_state.messages.append({"role": "assistant", "content": reply})
+                    st.stop()
+
+                progress_area.empty()
 
             if result.get("error"):
                 reply = (
