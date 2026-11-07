@@ -1,7 +1,15 @@
 """Inspects the database schema and returns formatted strings for use in prompts."""
 
 import os
+import re
 import sqlite3
+
+_PLAIN_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _ident(name: str) -> str:
+    """Quote an identifier only when it needs it (spaces, punctuation, leading digit)."""
+    return name if _PLAIN_IDENT.match(name) else '"' + name.replace('"', '""') + '"'
 
 
 def _check_db_exists(db_path: str) -> None:
@@ -30,11 +38,11 @@ def get_schema(db_path: str) -> str:
 
     parts = []
     for table in tables:
-        cursor.execute(f"PRAGMA table_info({table})")
+        cursor.execute(f"PRAGMA table_info({_ident(table)})")
         cols = cursor.fetchall()
-        col_defs = ", ".join(f"{c[1]} {c[2]}" for c in cols)
+        col_defs = ", ".join(f"{_ident(c[1])} {c[2]}" for c in cols)
 
-        cursor.execute(f"PRAGMA foreign_key_list({table})")
+        cursor.execute(f"PRAGMA foreign_key_list({_ident(table)})")
         fks = cursor.fetchall()
         fk_notes = ""
         if fks:
@@ -42,7 +50,7 @@ def get_schema(db_path: str) -> str:
                 f"{fk[3]} -> {fk[2]}.{fk[4]}" for fk in fks
             )
 
-        parts.append(f"  {table}({col_defs}){fk_notes}")
+        parts.append(f"  {_ident(table)}({col_defs}){fk_notes}")
 
     conn.close()
     return "Tables:\n" + "\n".join(parts)
@@ -57,7 +65,7 @@ def get_sample_rows(db_path: str) -> dict[str, dict]:
     tables = [row[0] for row in cursor.fetchall()]
     result = {}
     for table in tables:
-        cursor.execute(f"SELECT * FROM {table} LIMIT 1")
+        cursor.execute(f"SELECT * FROM {_ident(table)} LIMIT 1")
         cols = [d[0] for d in cursor.description]
         row = cursor.fetchone()
         if row:
@@ -87,11 +95,11 @@ def get_schema_with_enums(db_path: str) -> str:
 
     parts = []
     for table in tables:
-        cursor.execute(f"PRAGMA table_info({table})")
+        cursor.execute(f"PRAGMA table_info({_ident(table)})")
         cols = cursor.fetchall()
-        col_defs = ", ".join(f"{c[1]} {c[2]}" for c in cols)
+        col_defs = ", ".join(f"{_ident(c[1])} {c[2]}" for c in cols)
 
-        cursor.execute(f"PRAGMA foreign_key_list({table})")
+        cursor.execute(f"PRAGMA foreign_key_list({_ident(table)})")
         fks = cursor.fetchall()
         fk_notes = ""
         if fks:
@@ -99,18 +107,19 @@ def get_schema_with_enums(db_path: str) -> str:
                 f"{fk[3]} -> {fk[2]}.{fk[4]}" for fk in fks
             )
 
-        parts.append(f"  {table}({col_defs}){fk_notes}")
+        parts.append(f"  {_ident(table)}({col_defs}){fk_notes}")
 
         for col in cols:
             col_name, col_type = col[1], col[2]
             if col_type.upper() != "TEXT":
                 continue
             try:
+                # LIMIT 16 keeps this fast on large tables; >15 values are skipped anyway.
                 cursor.execute(
-                    f'SELECT DISTINCT "{col_name}" FROM {table} '
-                    f'WHERE "{col_name}" IS NOT NULL ORDER BY "{col_name}"'
+                    f'SELECT DISTINCT {_ident(col_name)} FROM {_ident(table)} '
+                    f'WHERE {_ident(col_name)} IS NOT NULL LIMIT 16'
                 )
-                distinct = [r[0] for r in cursor.fetchall()]
+                distinct = sorted(r[0] for r in cursor.fetchall())
                 if 2 <= len(distinct) <= 15:
                     values_str = ", ".join(f"'{v}'" for v in distinct)
                     parts.append(f"    -- {col_name} stored values: {values_str}")

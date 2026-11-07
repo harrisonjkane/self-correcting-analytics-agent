@@ -15,7 +15,7 @@ import anthropic
 
 MODEL = "claude-sonnet-4-6"
 
-_CRITIC_SYSTEM = """\
+_CRITIC_HEADER = """\
 You are a SQL quality critic for a SQLite analytics database.
 You will receive the original business question, the database schema (including
 the exact stored values for categorical columns), and the SQL to review.
@@ -45,6 +45,11 @@ Your checks are organized in two layers:
    The query must contain only SELECT statements. Any INSERT, UPDATE, DELETE,
    DROP, ALTER, CREATE, or TRUNCATE is a violation.
 
+"""
+
+# Layer 2 is specific to the bundled demo database. Pass domain_rules=None for any
+# other database (user uploads, BIRD) so these assumptions don't leak into it.
+DEMO_DOMAIN_RULES = """\
 ## LAYER 2: DOMAIN KNOWLEDGE RULES
 ## (Business-specific — encodes assumptions that cannot be derived from the
 ##  schema or question text alone. Must be reviewed and updated whenever the
@@ -59,11 +64,27 @@ Your checks are organized in two layers:
    WHERE orders.status = 'Completed', it is a violation, even if the question
    does not use the word "completed".
 
+"""
+
+_CRITIC_FOOTER = """\
 Respond with ONLY a JSON object — no markdown fences, no explanation:
   {"passed": true, "reason": ""}
   {"passed": false, "reason": "<check name>: <specific description of the issue>"}
 
 Report the first failing check you find. Do not list multiple issues."""
+
+_CRITIC_SYSTEM = _CRITIC_HEADER + DEMO_DOMAIN_RULES + _CRITIC_FOOTER
+
+
+def _critic_system(domain_rules: str | None) -> str:
+    if domain_rules is None:
+        header = _CRITIC_HEADER.replace(
+            "Your checks are organized in two layers:",
+            "Your checks are schema-derived only (no domain rules apply to this database):",
+        )
+        return header + _CRITIC_FOOTER
+    return _CRITIC_HEADER + domain_rules + _CRITIC_FOOTER
+
 
 _CHART_CRITIC_SYSTEM = """\
 You are a code safety and quality reviewer for auto-generated matplotlib chart code.
@@ -98,9 +119,11 @@ def review_sql(
     schema_context: str,
     client: anthropic.Anthropic,
     question: str = "",
+    domain_rules: str | None = DEMO_DOMAIN_RULES,
 ) -> dict:
     """
     Reviews sql against schema_context and the original question.
+    domain_rules: Layer 2 rules; None runs Layer 1 (schema-derived) checks only.
     question is required for the MISSING FILTER check; always pass it.
     Returns {"passed": bool, "reason": str, "tokens_used": int}.
     """
@@ -109,7 +132,7 @@ def review_sql(
         model=MODEL,
         max_tokens=256,
         temperature=0,
-        system=_CRITIC_SYSTEM,
+        system=_critic_system(domain_rules),
         messages=[
             {
                 "role": "user",

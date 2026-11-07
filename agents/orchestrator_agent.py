@@ -8,11 +8,12 @@ run_pipeline() — executes the full agent sequence based on the plan; drop-in
 
 import json
 import sqlite3
+from pathlib import Path
 
 import anthropic
 
 from agents.chart_agent import create_chart
-from agents.critic_agent import review_sql
+from agents.critic_agent import DEMO_DOMAIN_RULES, review_sql
 from agents.correction_log import log_correction, retrieve_similar_corrections
 from agents.explainer_agent import explain
 from agents.model_agent import should_model, train_model
@@ -97,94 +98,41 @@ def plan(question: str, schema_context: str, client: anthropic.Anthropic) -> dic
         }
 
 
-def run_pipeline(
+def generate_sql(
     question: str,
     schema: str,
     schema_with_enums: str,
-    db_path: str,
     client: anthropic.Anthropic,
-    _status=None,
-    on_step=None,
+    *,
+    system: str = _SQL_SYSTEM,
+    use_critic: bool = True,
+    domain_rules: str | None = DEMO_DOMAIN_RULES,
+    log_corrections: bool = True,
+    _step=None,
+    _emit=None,
 ) -> dict:
     """
-    Full agent pipeline: Plan → RAG → SQL+Critic loop → Execute → Extract → Explain
-    → conditionally Chart.
+    SQL generation + Critic self-correction loop.
 
-    Returns the same dict shape as the previous ask() so all callers are unaffected.
-    _status: optional callable(str) for the simple live progress bar.
-    on_step: optional callable(agent, status, detail) for the detailed step log.
+    use_critic=False generates once with no review (the ablation baseline).
+    domain_rules=None runs the Critic on schema-derived checks only.
+    log_corrections=False keeps corrections out of the shared RAG log.
+
+    Returns {"sql", "passed", "tokens_used", "retries", "critic_warnings"}.
     """
-    def _step(msg: str) -> None:
-        if _status:
-            _status(msg)
-
-    def _emit(agent: str, status: str, detail: str) -> None:
-        if on_step:
-            on_step(agent, status, str(detail) if detail is not None else "")
+    _step = _step or (lambda msg: None)
+    _emit = _emit or (lambda agent, status, detail: None)
 
     tokens = 0
     retries = 0
     critic_warnings = None
-
-    # ── Step 1: Plan ─────────────────────────────────────────────────────────
-    _step("Planning query...")
-    _emit("Orchestrator", "running", "")
-    plan_result = plan(question, schema, client)
-    tokens += plan_result.get("tokens_used", 0)
-    needs_chart = plan_result.get("needs_chart", False)
-    needs_model = plan_result.get("needs_model", False) or should_model(question)
-    _emit("Orchestrator", "done",
-          f"Chart: {'Yes' if needs_chart else 'No'} | "
-          f"Model: {'Yes' if needs_model else 'No'}")
-
-    # Schema loaded at app startup — emit table count immediately
-    _schema_tables = [
-        line.strip().split("(")[0]
-        for line in schema.splitlines()
-        if line.strip() and "(" in line
-    ]
-    _emit("Schema Agent", "done", f"{len(_schema_tables)} tables loaded")
-
-    # ── Step 2: RAG retrieval ─────────────────────────────────────────────────
-    _emit("RAG", "running", "")
-    similar_corrections = []
-    try:
-        similar_corrections = retrieve_similar_corrections(question, "sql", k=3)
-    except Exception:
-        pass  # RAG failure must never block the main pipeline
-    n_rag = len(similar_corrections)
-    if n_rag > 0:
-        first_reason = similar_corrections[0].get("error_or_reason", "")
-        category = first_reason.split(":")[0].strip() if ":" in first_reason else ""
-        hint = f" (e.g. {category})" if category else ""
-        _emit("RAG", "done",
-              f"{n_rag} past correction{'s' if n_rag != 1 else ''} retrieved{hint}")
-    else:
-        _emit("RAG", "done", "0 past corrections found (cold start)")
-
-    system = _SQL_SYSTEM
-    if similar_corrections:
-        examples = [
-            f'Past question: "{s["question"]}"\n'
-            f'Wrong SQL: {s["generated_code"]}\n'
-            f'Issue: {s["error_or_reason"]}\n'
-            f'Corrected SQL: {s["corrected_code"]}'
-            for s in similar_corrections
-        ]
-        rag_block = (
-            "Here are similar past questions where the first attempt was wrong "
-            "and how it was corrected:\n\n" + "\n\n".join(examples)
-        )
-        system = f"{_SQL_SYSTEM}\n\n{rag_block}"
-
-    # ── Step 3: SQL generation + Critic self-correction loop ──────────────────
     messages = [{"role": "user", "content": f"{schema}\n\nQuestion: {question}"}]
     sql = None
     prev_rejected_sql = None
     prev_rejection_reason = None
-    review = {"passed": True, "reason": "", "tokens_used": 0}  # safe default before loop
+    passed = True
 
-    for attempt in range(MAX_ATTEMPTS):
+    for attempt in range(MAX_ATTEMPTS if use_critic else 1):
         if attempt == 0:
             _step("Generating SQL...")
             _emit("SQL Agent", "running", "")
@@ -206,14 +154,20 @@ def run_pipeline(
         if attempt == 0:
             _emit("SQL Agent", "done", "Query generated")
 
+        if not use_critic:
+            break
+
         _step("Reviewing SQL...")
         _emit("Critic", "running", "")
-        review = review_sql(sql, schema_with_enums, client, question=question)
+        review = review_sql(
+            sql, schema_with_enums, client, question=question, domain_rules=domain_rules,
+        )
         tokens += review.get("tokens_used", 0)
+        passed = review["passed"]
 
-        if review["passed"]:
+        if passed:
             logged = False
-            if prev_rejected_sql is not None:
+            if prev_rejected_sql is not None and log_corrections:
                 try:
                     log_correction(
                         question, "sql",
@@ -250,8 +204,115 @@ def run_pipeline(
             }
         )
 
+    return {
+        "sql": sql,
+        "passed": passed,
+        "tokens_used": tokens,
+        "retries": retries,
+        "critic_warnings": critic_warnings,
+    }
+
+
+def run_pipeline(
+    question: str,
+    schema: str,
+    schema_with_enums: str,
+    db_path: str,
+    client: anthropic.Anthropic,
+    _status=None,
+    on_step=None,
+    domain_rules: str | None = DEMO_DOMAIN_RULES,
+    use_rag: bool = True,
+) -> dict:
+    """
+    Full agent pipeline: Plan → RAG → SQL+Critic loop → Execute → Extract → Explain
+    → conditionally Chart.
+
+    Returns the same dict shape as the previous ask() so all callers are unaffected.
+    _status: optional callable(str) for the simple live progress bar.
+    on_step: optional callable(agent, status, detail) for the detailed step log.
+    domain_rules: Critic Layer 2 rules (demo database by default; None for other data).
+    use_rag: read from and write to the correction log (demo database only).
+    """
+    def _step(msg: str) -> None:
+        if _status:
+            _status(msg)
+
+    def _emit(agent: str, status: str, detail: str) -> None:
+        if on_step:
+            on_step(agent, status, str(detail) if detail is not None else "")
+
+    tokens = 0
+    retries = 0
+    critic_warnings = None
+
+    # ── Step 1: Plan ─────────────────────────────────────────────────────────
+    _step("Planning query...")
+    _emit("Orchestrator", "running", "")
+    plan_result = plan(question, schema, client)
+    tokens += plan_result.get("tokens_used", 0)
+    needs_chart = plan_result.get("needs_chart", False)
+    needs_model = plan_result.get("needs_model", False) or should_model(question)
+    _emit("Orchestrator", "done",
+          f"Chart: {'Yes' if needs_chart else 'No'} | "
+          f"Model: {'Yes' if needs_model else 'No'}")
+
+    # Schema loaded at app startup — emit table count immediately
+    _schema_tables = [
+        line.strip().split("(")[0]
+        for line in schema.splitlines()
+        if line.strip() and "(" in line
+    ]
+    _emit("Schema Agent", "done", f"{len(_schema_tables)} tables loaded")
+
+    # ── Step 2: RAG retrieval ─────────────────────────────────────────────────
+    _emit("RAG", "running", "")
+    similar_corrections = []
+    if use_rag:
+        try:
+            similar_corrections = retrieve_similar_corrections(question, "sql", k=3)
+        except Exception:
+            pass  # RAG failure must never block the main pipeline
+    n_rag = len(similar_corrections)
+    if n_rag > 0:
+        first_reason = similar_corrections[0].get("error_or_reason", "")
+        category = first_reason.split(":")[0].strip() if ":" in first_reason else ""
+        hint = f" (e.g. {category})" if category else ""
+        _emit("RAG", "done",
+              f"{n_rag} past correction{'s' if n_rag != 1 else ''} retrieved{hint}")
+    elif use_rag:
+        _emit("RAG", "done", "0 past corrections found (cold start)")
+    else:
+        _emit("RAG", "done", "Skipped (correction log covers the demo database only)")
+
+    system = _SQL_SYSTEM
+    if similar_corrections:
+        examples = [
+            f'Past question: "{s["question"]}"\n'
+            f'Wrong SQL: {s["generated_code"]}\n'
+            f'Issue: {s["error_or_reason"]}\n'
+            f'Corrected SQL: {s["corrected_code"]}'
+            for s in similar_corrections
+        ]
+        rag_block = (
+            "Here are similar past questions where the first attempt was wrong "
+            "and how it was corrected:\n\n" + "\n\n".join(examples)
+        )
+        system = f"{_SQL_SYSTEM}\n\n{rag_block}"
+
+    # ── Step 3: SQL generation + Critic self-correction loop ──────────────────
+    gen = generate_sql(
+        question, schema, schema_with_enums, client,
+        system=system, domain_rules=domain_rules, log_corrections=use_rag,
+        _step=_step, _emit=_emit,
+    )
+    sql = gen["sql"]
+    tokens += gen["tokens_used"]
+    retries = gen["retries"]
+    critic_warnings = gen["critic_warnings"]
+
     # ── Guard: never execute SQL the Critic rejected on all attempts ─────────
-    if not review["passed"]:
+    if not gen["passed"]:
         return {
             "answer": None,
             "explanation": None,
@@ -272,7 +333,8 @@ def run_pipeline(
     # ── Step 4: Execute SQL ───────────────────────────────────────────────────
     _step("Executing query...")
     try:
-        conn = sqlite3.connect(db_path)
+        # Read-only: generated SQL can never modify the database, Critic or not.
+        conn = sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True)
         rows = conn.execute(sql).fetchall()
         conn.close()
     except Exception as exc:
