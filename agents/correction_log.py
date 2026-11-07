@@ -37,7 +37,10 @@ def _voyage_client() -> "voyageai.Client":
 
 
 def _chroma_collection() -> "chromadb.Collection":
-    client = chromadb.PersistentClient(path=CHROMA_PATH)
+    client = chromadb.PersistentClient(
+        path=CHROMA_PATH,
+        settings=chromadb.config.Settings(anonymized_telemetry=False),
+    )
     return client.get_or_create_collection(
         name=COLLECTION_NAME,
         metadata={"hnsw:space": "cosine"},
