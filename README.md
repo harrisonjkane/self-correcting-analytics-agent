@@ -1,5 +1,7 @@
 # Self-Correcting Analytics Agent
 
+[![tests](https://github.com/harrisonjkane/self-correcting-analytics-agent/actions/workflows/tests.yml/badge.svg)](https://github.com/harrisonjkane/self-correcting-analytics-agent/actions/workflows/tests.yml)
+
 **Ask questions about your data in plain English. SQL is written, reviewed by a Critic agent, and automatically corrected before you ever see it.**
 
 Live demo: [multi-agent-query-engine.streamlit.app](https://multi-agent-query-engine.streamlit.app)
@@ -46,18 +48,18 @@ Explainer Agent  →  Chart Agent (conditional)  →  Model Agent (conditional)
 Plain-English answer + chart + model results
 ```
 
-**Eight specialized agents**, each a separate Claude API call with a focused system prompt:
+**Six LLM agents**, each a separate Claude API call with a focused system prompt, plus two non-LLM components (schema introspection and the RAG correction log):
 
 | Agent | Role |
 |---|---|
 | Orchestrator | Routes question — does it need a chart? A predictive model? |
-| Schema Agent | Introspects the database — tables, columns, actual stored enum values |
+| Schema Agent *(no LLM)* | Introspects the database — tables, columns, actual stored enum values |
 | SQL Agent | Generates SQL using formal tool use (not regex extraction) |
 | Critic Agent | Reviews SQL before execution — two-layer design (schema-derived + domain rules) |
 | Explainer Agent | Converts raw results into plain-English narrative |
 | Chart Agent | Generates and executes matplotlib charts, reviewed by Critic before execution |
 | Model Agent | Trains sklearn models (regression/classification/clustering) when question implies prediction |
-| Correction Log | Embeds past mistakes via Voyage AI, stores in ChromaDB, retrieves similar corrections before generation |
+| Correction Log *(retrieval, no LLM)* | Embeds past mistakes via Voyage AI, stores in ChromaDB, retrieves similar corrections before generation |
 
 ---
 
@@ -78,7 +80,7 @@ This design is documented rather than hidden. Layer 2 exists because Layer 1 has
 
 The evaluation benchmark was defined **before any agent code was written**, per the project's build-order principle: measure first, build second.
 
-**16 questions across 5 difficulty tiers**, each with a verified correct answer:
+**16 questions across 5 difficulty tiers.** Accuracy is scored automatically on the **11 questions in Tiers 1–3**, each with a hand-verified answer; the 3 Tier 4 reasoning questions and 2 Tier 5 chart/model questions are reviewed manually. A CI test re-derives all 11 ground-truth answers from the database on every push.
 
 | Tier | Focus | Count |
 |---|---|---|
@@ -92,11 +94,11 @@ The evaluation benchmark was defined **before any agent code was written**, per 
 
 | State | Accuracy | Notes |
 |---|---|---|
-| No Critic (Phase 1 baseline) | 45.5% | Bugs are semantic — valid SQL, wrong answers |
-| Critic, accidentally domain-armed | 100% | Caught via git diff audit — unrequested scope change, reverted |
-| Critic, schema-only | 90.9% | Honest ceiling — can't infer business semantics from schema alone |
-| Hybrid Critic, RAG cleared (CLEAN_run1) | 100% | Domain rule isolated from RAG influence — 2 real retries confirm it works independently |
-| Hybrid Critic, RAG warm (run2/3) | 100%, 0 retries | RAG retrieval working — past corrections reduce retries on similar questions |
+| No Critic (Phase 1 baseline) | 45.5% (5/11) | Bugs are semantic — valid SQL, wrong answers |
+| Critic, accidentally domain-armed | 100% (11/11) | Caught via git diff audit — unrequested scope change, reverted |
+| Critic, schema-only | 90.9% (10/11) | Honest ceiling — can't infer business semantics from schema alone |
+| Hybrid Critic, RAG cleared (CLEAN_run1) | 100% (11/11) | Domain rule isolated from RAG influence — 2 real retries confirm it works independently |
+| Hybrid Critic, RAG warm (run2/3) | 100% (11/11), 0 retries | RAG retrieval working — past corrections reduce retries on similar questions |
 
 **Cost of the improvement (not free, worth knowing):**
 
@@ -155,6 +157,10 @@ python3 data/build_database.py
 
 # Run locally
 streamlit run app.py
+
+# Run the test suite (no API keys needed)
+pip install pytest
+pytest
 ```
 
 **Environment variables** — create a `.env` file:
@@ -201,9 +207,14 @@ self-correcting-analytics-agent/
 ├── evals/
 │   ├── benchmark.py                # 16 questions + verified ground truth (built first)
 │   └── scoring.py                  # Pipeline-agnostic scoring harness
-├── run_phase1_benchmark.py         # Baseline measurement (no Critic)
-├── run_phase2_benchmark.py         # Critic-enabled measurement
-├── run_phase3_benchmark.py         # RAG-enabled measurement
+├── tests/                          # Deterministic pytest suite, run in CI (no API keys)
+├── scripts/
+│   ├── run_phase1_benchmark.py     # Baseline measurement (no Critic)
+│   ├── run_phase2_benchmark.py     # Critic-enabled measurement
+│   ├── run_phase3_benchmark.py     # RAG-enabled measurement
+│   ├── benchmark_critic_*.py       # Critic-variant runs (general / hybrid / clean)
+│   ├── populate_correction_log.py  # Seeds the RAG correction log
+│   └── check_*.py                  # Manual, LLM-backed agent checks
 └── requirements.txt
 ```
 
