@@ -111,6 +111,20 @@ The evaluation benchmark was defined **before any agent code was written**, per 
 
 ---
 
+## Use your own data
+
+Upload a CSV, an Excel workbook (one table per sheet), or a SQLite database from the sidebar. The file is loaded into a temporary SQLite database for that session only. Table and column names are normalized to snake_case so generated SQL stays simple.
+
+On uploaded data, the Critic runs its schema-derived checks (Layer 1) only. The demo's business rules (Layer 2) and the RAG correction log are turned off, because they encode knowledge about the demo database and would be wrong anywhere else. Generated SQL always executes over a read-only connection.
+
+---
+
+## External benchmark: BIRD (in progress)
+
+The 11-question benchmark above measures the Critic on the database its rules were written for. To test whether it generalizes, `scripts/run_bird_eval.py` runs the same Critic-on vs. Critic-off ablation on [BIRD Mini-Dev](https://github.com/bird-bench/mini_dev), which uses real, messy databases the Critic has never seen. Layer 2 and RAG are off, and execution accuracy is scored BIRD's way. Method and reporting plan: [docs/bird_eval_plan.md](docs/bird_eval_plan.md).
+
+---
+
 ## Tech stack
 
 | Layer | Choice |
@@ -203,16 +217,21 @@ self-correcting-analytics-agent/
 │   ├── explainer_agent.py          # Plain-English narrative generation
 │   ├── chart_agent.py              # Matplotlib generation + Critic-reviewed execution
 │   ├── model_agent.py              # sklearn ML + SARIMAX forecasting
+│   ├── data_ingest.py              # CSV / Excel / SQLite uploads → session SQLite DB
 │   └── correction_log.py           # RAG — Voyage AI embeddings + ChromaDB
 ├── evals/
 │   ├── benchmark.py                # 16 questions + verified ground truth (built first)
-│   └── scoring.py                  # Pipeline-agnostic scoring harness
+│   ├── scoring.py                  # Pipeline-agnostic scoring harness
+│   └── bird.py                     # BIRD loading, sampling, execution-accuracy scoring
+├── docs/
+│   └── bird_eval_plan.md           # External benchmark method + reporting plan
 ├── tests/                          # Deterministic pytest suite, run in CI (no API keys)
 ├── scripts/
 │   ├── run_phase1_benchmark.py     # Baseline measurement (no Critic)
 │   ├── run_phase2_benchmark.py     # Critic-enabled measurement
 │   ├── run_phase3_benchmark.py     # RAG-enabled measurement
 │   ├── benchmark_critic_*.py       # Critic-variant runs (general / hybrid / clean)
+│   ├── run_bird_eval.py            # BIRD Critic-on vs. Critic-off ablation
 │   ├── populate_correction_log.py  # Seeds the RAG correction log
 │   └── check_*.py                  # Manual, LLM-backed agent checks
 └── requirements.txt
