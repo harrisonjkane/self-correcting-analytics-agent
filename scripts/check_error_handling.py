@@ -1,5 +1,5 @@
 """
-_test_error_handling.py — Deliberately triggers failure conditions to confirm graceful handling.
+scripts/check_error_handling.py — Deliberately triggers failure conditions to confirm graceful handling.
 
 Tests 1-3 require no real API calls (pure function or mock-based).
 Test 4 requires network access to obtain a typed AuthenticationError from Anthropic.
@@ -10,6 +10,13 @@ Failure modes tested:
   3. Critic exhaustion         → error dict returned after 3 rejections, rejected SQL never runs
   4. Bad API key               → anthropic.AuthenticationError (typed), not a generic crash
 """
+
+# Run from anywhere: put the repo root on sys.path and use it as the working dir.
+import os, sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+os.chdir(ROOT)
 
 import os
 import sys

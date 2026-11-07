@@ -5,7 +5,7 @@ Runs the same Tier 1–3 questions as Phase 1 but through the ask() pipeline,
 which adds a Critic review step between SQL generation and execution.
 
 Usage:
-    python run_phase2_benchmark.py
+    python3 scripts/run_phase2_benchmark.py
 
 Compare results against Phase 1:
     python -c "
@@ -14,6 +14,13 @@ Compare results against Phase 1:
     compare_runs('phase1_single_agent_baseline', 'phase2_critic_added')
     "
 """
+
+# Run from anywhere: put the repo root on sys.path and use it as the working dir.
+import os, sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+os.chdir(ROOT)
 
 import os
 import sys
@@ -24,12 +31,12 @@ import anthropic
 
 load_dotenv()
 
-sys.path.insert(0, str(Path(__file__).parent / "evals"))
+sys.path.insert(0, str(ROOT / "evals"))
 
 from agents.schema_agent import get_schema, get_schema_with_enums
 from agents.sql_agent import ask
 
-DB_PATH = str(Path(__file__).parent / "data" / "analytics.db")
+DB_PATH = str(ROOT / "data" / "analytics.db")
 
 
 def main():

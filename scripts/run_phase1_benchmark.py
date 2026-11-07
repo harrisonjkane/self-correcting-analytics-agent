@@ -5,8 +5,15 @@ Builds the database if it doesn't exist, then runs Tier 1–3 questions
 through the SQL agent and scores results via the eval harness.
 
 Usage:
-    python run_phase1_benchmark.py
+    python3 scripts/run_phase1_benchmark.py
 """
+
+# Run from anywhere: put the repo root on sys.path and use it as the working dir.
+import os, sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+os.chdir(ROOT)
 
 import os
 import sys
@@ -18,12 +25,12 @@ import anthropic
 load_dotenv()
 
 # evals/ uses bare `from benchmark import BENCHMARK` — add it to path
-sys.path.insert(0, str(Path(__file__).parent / "evals"))
+sys.path.insert(0, str(ROOT / "evals"))
 
 from agents.schema_agent import get_schema
 from agents.sql_agent import run_query
 
-DB_PATH = str(Path(__file__).parent / "data" / "analytics.db")
+DB_PATH = str(ROOT / "data" / "analytics.db")
 
 
 def _ensure_db():
@@ -32,7 +39,7 @@ def _ensure_db():
         import importlib.util
         spec = importlib.util.spec_from_file_location(
             "build_database",
-            Path(__file__).parent / "data" / "build_database.py",
+            ROOT / "data" / "build_database.py",
         )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)

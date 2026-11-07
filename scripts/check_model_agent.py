@@ -6,6 +6,13 @@ Tests:
   2. End-to-end regression: "predict order value based on quantity and product category"
 """
 
+# Run from anywhere: put the repo root on sys.path and use it as the working dir.
+import os, sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+os.chdir(ROOT)
+
 import os
 import sys
 

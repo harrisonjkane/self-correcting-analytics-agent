@@ -7,6 +7,13 @@ Runs 3 benchmark questions through the full pipeline and confirms:
   - Charts pass Critic review before execution
 """
 
+# Run from anywhere: put the repo root on sys.path and use it as the working dir.
+import os, sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+os.chdir(ROOT)
+
 import os
 import sys
 
