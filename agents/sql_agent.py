@@ -177,16 +177,18 @@ def ask(
     client: anthropic.Anthropic,
     _status=None,
     on_step=None,
+    **pipeline_options,
 ) -> dict:
     """
     Phase 2+ entry point — delegates all pipeline logic to the Orchestrator.
+    pipeline_options (domain_rules, use_rag) pass straight through to run_pipeline().
     _status: optional callable(str) for the simple live progress bar.
     on_step: optional callable(agent, status, detail) for the detailed step log.
     """
     from agents.orchestrator_agent import run_pipeline  # lazy import avoids circular dep
     return run_pipeline(
         question, schema, schema_with_enums, db_path, client,
-        _status=_status, on_step=on_step,
+        _status=_status, on_step=on_step, **pipeline_options,
     )
 
 

@@ -1,12 +1,15 @@
 """Multi-Agent Query Engine — Streamlit UI for the full agent pipeline."""
 
 import os
+import tempfile
 import traceback
 
 import anthropic
 import streamlit as st
 from dotenv import load_dotenv
 
+from agents.critic_agent import DEMO_DOMAIN_RULES
+from agents.data_ingest import SUPPORTED_EXTENSIONS, IngestError, load_upload
 from agents.schema_agent import get_schema, get_schema_with_enums, get_sample_rows
 from agents.sql_agent import ask, check_browse_request
 from evals.benchmark import BENCHMARK
@@ -14,6 +17,7 @@ from evals.benchmark import BENCHMARK
 load_dotenv()
 
 DB_PATH = "data/analytics.db"
+DEMO_LABEL = "Demo: B2B SaaS sales database"
 
 
 def _get_api_key(key: str) -> str | None:
@@ -61,6 +65,24 @@ st.markdown(
 )
 
 # ── Session state init ────────────────────────────────────────────────────────
+def _use_database(db_path: str, is_demo: bool, label: str) -> None:
+    """Point the app at a database: load its schema and start a fresh conversation."""
+    st.session_state.schema = get_schema(db_path)
+    st.session_state.schema_with_enums = get_schema_with_enums(db_path)
+    st.session_state.sample_rows = get_sample_rows(db_path)
+    st.session_state.db_path = db_path
+    st.session_state.is_demo = is_demo
+    st.session_state.data_label = label
+    st.session_state.messages = []
+
+
+def _pipeline_options() -> dict:
+    """Demo-specific Critic rules and the RAG correction log apply to the demo data only."""
+    if st.session_state.get("is_demo", True):
+        return {"domain_rules": DEMO_DOMAIN_RULES, "use_rag": True}
+    return {"domain_rules": None, "use_rag": False}
+
+
 if "ready" not in st.session_state:
     api_key = _get_api_key("ANTHROPIC_API_KEY")
     if not api_key:
@@ -68,11 +90,8 @@ if "ready" not in st.session_state:
         st.session_state.init_error = "ANTHROPIC_API_KEY is not set in .env"
     else:
         try:
-            st.session_state.schema = get_schema(DB_PATH)
-            st.session_state.schema_with_enums = get_schema_with_enums(DB_PATH)
-            st.session_state.sample_rows = get_sample_rows(DB_PATH)
             st.session_state.client = anthropic.Anthropic(api_key=api_key)
-            st.session_state.messages = []
+            _use_database(DB_PATH, is_demo=True, label=DEMO_LABEL)
             st.session_state.ready = True
         except Exception as exc:
             st.session_state.ready = False
@@ -86,6 +105,42 @@ with st.sidebar:
         "SQL is generated, reviewed by a Critic agent, and automatically corrected "
         "before you ever see it."
     )
+
+    st.divider()
+
+    st.subheader("Data")
+    st.caption(f"Querying: **{st.session_state.get('data_label', DEMO_LABEL)}**")
+    upload = st.file_uploader(
+        "Upload your own data",
+        type=[ext.lstrip(".") for ext in SUPPORTED_EXTENSIONS],
+        help="CSV, Excel (one table per sheet), or a SQLite database. "
+             "Kept in a temporary file for this session only.",
+    )
+    if (
+        upload is not None
+        and st.session_state.get("ready")
+        and st.session_state.get("upload_id") != upload.file_id
+    ):
+        try:
+            if "upload_dir" not in st.session_state:
+                st.session_state.upload_dir = tempfile.mkdtemp(prefix="sca_upload_")
+            path = load_upload(upload.name, upload.getvalue(), st.session_state.upload_dir)
+            _use_database(path, is_demo=False, label=upload.name)
+            st.session_state.upload_id = upload.file_id
+            st.rerun()
+        except IngestError as exc:
+            st.error(str(exc))
+        except Exception:
+            traceback.print_exc()
+            st.error("Couldn't load that file. Check that it opens correctly and try again.")
+    if not st.session_state.get("is_demo", True):
+        st.caption(
+            "Uploaded data: the Critic runs schema-derived checks only. "
+            "Demo business rules and the correction log are off."
+        )
+        if st.button("Back to demo data", use_container_width=True):
+            _use_database(DB_PATH, is_demo=True, label=DEMO_LABEL)
+            st.rerun()
 
     st.divider()
 
@@ -122,14 +177,15 @@ with st.sidebar:
 
     st.divider()
 
-    st.subheader("Try asking...")
-    for q in EXAMPLE_QUESTIONS:
-        if st.button(q, key=f"ex_{hash(q)}", use_container_width=True):
-            st.session_state["prefilled_question"] = q
-            st.rerun()
+    if st.session_state.get("is_demo", True):
+        st.subheader("Try asking...")
+        for q in EXAMPLE_QUESTIONS:
+            if st.button(q, key=f"ex_{hash(q)}", use_container_width=True):
+                st.session_state["prefilled_question"] = q
+                st.rerun()
+        st.divider()
 
-    st.divider()
-    st.toggle("Show pipeline steps", value=False, key="show_steps")
+    st.toggle("Show pipeline steps", value=True, key="show_steps")
 
 # ── Main area ─────────────────────────────────────────────────────────────────
 st.title("📊 Multi-Agent Query Engine")
@@ -157,7 +213,9 @@ for msg in st.session_state.messages:
 
 # User input — sidebar buttons set prefilled_question; consume it before chat_input
 prefilled = st.session_state.pop("prefilled_question", None)
-question = prefilled or st.chat_input("Ask a question about your data...")
+# Always render the input box; short-circuiting it hid the box after an example click.
+typed = st.chat_input("Ask a question about your data...")
+question = prefilled or typed
 if question:
     st.session_state.messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
@@ -168,7 +226,7 @@ if question:
         browse = check_browse_request(
             question,
             st.session_state.schema,
-            DB_PATH,
+            st.session_state.db_path,
         )
         if browse is not None:
             if browse.get("browse_error"):
@@ -190,7 +248,7 @@ if question:
                     "sql": browse["sql"],
                 })
         else:
-            show_steps = st.session_state.get("show_steps", False)
+            show_steps = st.session_state.get("show_steps", True)
             result = None
 
             def _render_result(result: dict) -> None:
@@ -257,8 +315,9 @@ if question:
                         question=question,
                         schema=st.session_state.schema,
                         schema_with_enums=st.session_state.schema_with_enums,
-                        db_path=DB_PATH,
+                        db_path=st.session_state.db_path,
                         client=st.session_state.client,
+                        **_pipeline_options(),
                         _status=None,
                         on_step=_on_step,
                     )
@@ -341,8 +400,9 @@ if question:
                         question=question,
                         schema=st.session_state.schema,
                         schema_with_enums=st.session_state.schema_with_enums,
-                        db_path=DB_PATH,
+                        db_path=st.session_state.db_path,
                         client=st.session_state.client,
+                        **_pipeline_options(),
                         _status=_on_status,
                         on_step=None,
                     )
