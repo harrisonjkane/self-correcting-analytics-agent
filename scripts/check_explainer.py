@@ -11,8 +11,15 @@ Questions selected to cover each answer type:
   T2-02  grouped_values (revenue by segment)
 
 Usage:
-    python _test_explainer.py
+    python3 scripts/check_explainer.py
 """
+
+# Run from anywhere: put the repo root on sys.path and use it as the working dir.
+import os, sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+os.chdir(ROOT)
 
 import os
 import sys
@@ -23,12 +30,12 @@ import anthropic
 
 load_dotenv()
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(ROOT))
 
 from agents.schema_agent import get_schema, get_schema_with_enums
 from agents.sql_agent import ask
 
-DB_PATH = str(Path(__file__).parent / "data" / "analytics.db")
+DB_PATH = str(ROOT / "data" / "analytics.db")
 
 TEST_QUESTIONS = [
     {

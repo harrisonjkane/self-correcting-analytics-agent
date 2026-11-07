@@ -7,8 +7,8 @@ SQL generation. Primary metric vs Phase 2: retry count (accuracy is already
 100% and has no further room to improve).
 
 Usage:
-    python populate_correction_log.py   # seed the log first
-    python run_phase3_benchmark.py      # then run this
+    python3 scripts/populate_correction_log.py   # seed the log first
+    python3 scripts/run_phase3_benchmark.py      # then run this
 
 Compare against Phase 2:
     python -c "
@@ -17,6 +17,13 @@ Compare against Phase 2:
     compare_runs('phase2_critic_added', 'phase3_rag_added')
     "
 """
+
+# Run from anywhere: put the repo root on sys.path and use it as the working dir.
+import os, sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+os.chdir(ROOT)
 
 import os
 import sys
@@ -27,12 +34,12 @@ import anthropic
 
 load_dotenv()
 
-sys.path.insert(0, str(Path(__file__).parent / "evals"))
+sys.path.insert(0, str(ROOT / "evals"))
 
 from agents.schema_agent import get_schema, get_schema_with_enums
 from agents.sql_agent import ask
 
-DB_PATH = str(Path(__file__).parent / "data" / "analytics.db")
+DB_PATH = str(ROOT / "data" / "analytics.db")
 
 
 def main():

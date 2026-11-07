@@ -10,8 +10,15 @@ After this script finishes, run run_phase3_benchmark.py to test whether those
 stored corrections reduce retries on the same question set.
 
 Usage:
-    python populate_correction_log.py
+    python3 scripts/populate_correction_log.py
 """
+
+# Run from anywhere: put the repo root on sys.path and use it as the working dir.
+import os, sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+os.chdir(ROOT)
 
 import os
 import sys
@@ -22,12 +29,12 @@ import anthropic
 
 load_dotenv()
 
-sys.path.insert(0, str(Path(__file__).parent / "evals"))
+sys.path.insert(0, str(ROOT / "evals"))
 
 from agents.schema_agent import get_schema, get_schema_with_enums
 from agents.sql_agent import ask
 
-DB_PATH = str(Path(__file__).parent / "data" / "analytics.db")
+DB_PATH = str(ROOT / "data" / "analytics.db")
 
 
 def main():
@@ -54,7 +61,7 @@ def main():
     from agents.correction_log import _chroma_collection
     count = _chroma_collection().count()
     print(f"\nCorrection log seeded: {count} record(s) stored in ChromaDB.")
-    print("Run `python run_phase3_benchmark.py` to test RAG-assisted generation.")
+    print("Run `python3 scripts/run_phase3_benchmark.py` to test RAG-assisted generation.")
 
 
 if __name__ == "__main__":
